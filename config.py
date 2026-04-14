@@ -21,6 +21,7 @@ TABLES = {
     "dispatched_goods": "erp_dispatched_goods",
     "material_issues": "erp_material_issues",
     "order_staging": "erp_order_staging",
+    "email_config": "erp_email_config",
 }
 
 # Material Categories
