@@ -25,13 +25,13 @@ def render():
     filtered = inventory
     if search:
         s = search.lower()
-        filtered = [i for i in filtered if s in i.get("item_name","").lower() or s in i.get("specification","").lower() or s in i.get("vendor","").lower()]
+        filtered = [i for i in filtered if s in i.get("item_name","").lower() or s in i.get("specification","").lower() or s in i.get("category","").lower()]
     if cat != "All":
         filtered = [i for i in filtered if i.get("category") == cat]
 
     if filtered:
         df = pd.DataFrame(filtered)
-        cols = ["item_name", "vendor", "category", "specification", "quantity", "unit", "location"]
+        cols = ["item_name", "category", "specification", "quantity", "unit", "location"]
         available = [c for c in cols if c in df.columns]
         display_df = df[available].copy()
         display_df.columns = [c.replace("_"," ").title() for c in available]

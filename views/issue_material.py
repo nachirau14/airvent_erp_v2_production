@@ -41,7 +41,7 @@ def render():
         ic1, ic2, ic3, ic4 = st.columns([3, 1, 1, 1])
         with ic1:
             st.markdown(f"**{item['item_name']}**")
-            st.caption(f"{item.get('vendor','')} | {item.get('specification','')}")
+            st.caption(f"{item.get('category','')} | {item.get('specification','')}")
         with ic2: st.caption(f"Avail: {item.get('quantity',0)} {item.get('unit','')}")
         with ic3:
             qty = st.number_input("Qty", min_value=0.0, max_value=float(item.get("quantity",0)),

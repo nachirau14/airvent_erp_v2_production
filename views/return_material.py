@@ -17,7 +17,7 @@ def render():
         s = search.lower()
         filtered = [i for i in inventory if s in i.get("item_name","").lower() or s in i.get("specification","").lower()]
 
-    item_opts = {f"{i['item_name']} | {i.get('vendor','')} (Stock: {i.get('quantity',0)} {i.get('unit','')})": i for i in filtered}
+    item_opts = {f"{i['item_name']} | {i.get('specification','')} (Stock: {i.get('quantity',0)} {i.get('unit','')})": i for i in filtered}
     sel = st.selectbox("Select Item *", list(item_opts.keys()), key="ret_sel")
     item = item_opts[sel]
 
@@ -25,7 +25,7 @@ def render():
     <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:16px;margin:12px 0">
         <div style="font-weight:700;color:#166534">{item['item_name']}</div>
         <div style="color:#15803d;font-size:0.85rem;margin-top:4px">
-            Stock: <strong>{item.get('quantity',0)} {item.get('unit','')}</strong> • {item.get('vendor','')} • {item.get('location','')}
+            Stock: <strong>{item.get('quantity',0)} {item.get('unit','')}</strong> • {item.get('category','')} • {item.get('location','')}
         </div>
     </div>""", unsafe_allow_html=True)
 
