@@ -22,6 +22,8 @@ TABLES = {
     "material_issues": "erp_material_issues",
     "order_staging": "erp_order_staging",
     "email_config": "erp_email_config",
+    "scrap_inventory": "erp_scrap_inventory",
+    "company_config": "erp_company_config",
 }
 
 # Material Categories

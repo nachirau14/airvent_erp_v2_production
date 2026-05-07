@@ -47,6 +47,53 @@ def _now():
 def _today():
     return datetime.utcnow().strftime("%Y-%m-%d")
 
+def _financial_year_prefix():
+    """Return financial year prefix like FY2526 for Apr 2025 - Mar 2026."""
+    now = datetime.utcnow()
+    fy_start = now.year if now.month >= 4 else now.year - 1
+    fy_end = fy_start + 1
+    return f"{str(fy_start)[2:]}{str(fy_end)[2:]}"
+
+COUNTER_TABLE = "erp_counters"
+
+def _next_sequential_id(prefix, counter_name=None):
+    """Get next sequential ID like MI-0001, RMPO-FY2526-0001.
+    Uses an atomic counter in DynamoDB for concurrency safety."""
+    if counter_name is None:
+        counter_name = prefix.rstrip("-")
+    db = get_dynamodb()
+    table = db.Table(COUNTER_TABLE)
+    try:
+        resp = table.update_item(
+            Key={"counter_name": counter_name},
+            UpdateExpression="SET counter_value = if_not_exists(counter_value, :zero) + :inc",
+            ExpressionAttributeValues={":inc": 1, ":zero": 0},
+            ReturnValues="UPDATED_NEW",
+        )
+        seq = int(resp["Attributes"]["counter_value"])
+    except Exception:
+        # Fallback if counter table doesn't exist
+        return _gen_id(prefix)
+    return f"{prefix}{seq:04d}"
+
+def _next_po_id(prefix):
+    """Sequential PO ID per financial year: RMPO-FY2526-0001."""
+    fy = _financial_year_prefix()
+    counter_name = f"{prefix.rstrip('-')}-FY{fy}"
+    db = get_dynamodb()
+    table = db.Table(COUNTER_TABLE)
+    try:
+        resp = table.update_item(
+            Key={"counter_name": counter_name},
+            UpdateExpression="SET counter_value = if_not_exists(counter_value, :zero) + :inc",
+            ExpressionAttributeValues={":inc": 1, ":zero": 0},
+            ReturnValues="UPDATED_NEW",
+        )
+        seq = int(resp["Attributes"]["counter_value"])
+    except Exception:
+        return _gen_id(prefix)
+    return f"{prefix}FY{fy}-{seq:04d}"
+
 def _to_decimal(obj):
     if isinstance(obj, float): return Decimal(str(obj))
     if isinstance(obj, dict): return {k: _to_decimal(v) for k, v in obj.items()}
@@ -70,76 +117,422 @@ def _scan_all(table_name):
     return [_from_decimal(i) for i in items]
 
 
+def bulk_delete_all(table_name, key_fields):
+    """Delete ALL items from a DynamoDB table. key_fields = list of key attribute names."""
+    db = get_dynamodb()
+    table = db.Table(table_name)
+    items = _scan_all(table_name)
+    deleted = 0
+    with table.batch_writer() as batch:
+        for item in items:
+            key = {k: item[k] for k in key_fields if k in item}
+            if key:
+                # Convert back to proper types for DynamoDB keys
+                for k, v in key.items():
+                    if isinstance(v, float):
+                        key[k] = str(v) if '.' not in str(v) else Decimal(str(v))
+                batch.delete_item(Key=key)
+                deleted += 1
+    return deleted
+
+
+def bulk_delete_table_data(table_key):
+    """Delete all data from a table by its config key. Returns count deleted."""
+    table_keys_map = {
+        "master_items": ["item_id"],
+        "projects": ["project_id"],
+        "boq_items": ["project_id", "item_id"],
+        "inventory": ["item_id"],
+        "vendors": ["vendor_id"],
+        "service_vendors": ["vendor_id"],
+        "service_vendor_services": ["vendor_id", "service_id"],
+        "raw_material_po": ["po_id"],
+        "raw_material_po_items": ["po_id", "item_id"],
+        "service_po": ["po_id"],
+        "service_po_items": ["po_id", "item_id"],
+        "production_tracking": ["project_id", "product_id"],
+        "finished_goods": ["fg_id"],
+        "dispatched_goods": ["dispatch_id"],
+        "material_issues": ["issue_id"],
+        "order_staging": ["stage_id"],
+        "email_config": ["config_id"],
+        "scrap_inventory": ["item_id"],
+        "company_config": ["config_id"],
+    }
+    if table_key not in TABLES:
+        return 0
+    key_fields = table_keys_map.get(table_key, [])
+    if not key_fields:
+        return 0
+    return bulk_delete_all(TABLES[table_key], key_fields)
+
+
+def reset_counter(counter_name):
+    """Reset a sequential counter to 0."""
+    db = get_dynamodb()
+    table = db.Table(COUNTER_TABLE)
+    try:
+        table.put_item(Item={"counter_name": counter_name, "counter_value": 0})
+    except Exception:
+        pass
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  S3 — PDF Generation & Attachments
 # ═══════════════════════════════════════════════════════════════════
+def _get_company_config():
+    """Get company config (name, address, GSTIN, logo S3 key)."""
+    try:
+        db = get_dynamodb()
+        table = db.Table(TABLES.get("company_config", "erp_company_config"))
+        resp = table.get_item(Key={"config_id": "main"})
+        item = resp.get("Item")
+        if item:
+            return _from_decimal(item)
+    except Exception:
+        pass
+    return {
+        "config_id": "main",
+        "company_name": "YOUR COMPANY NAME",
+        "address": "Your Address",
+        "gstin": "XXXXXXXXXXXX",
+        "logo_s3_key": "",
+        "shipping_address": "Your Shipping Address",
+    }
+
+
+def save_company_config(config):
+    db = get_dynamodb()
+    table = db.Table(TABLES.get("company_config", "erp_company_config"))
+    config["config_id"] = "main"
+    config["updated_at"] = _now()
+    table.put_item(Item=config)
+
+
+def upload_company_logo(file_bytes, file_name):
+    """Upload company logo to S3 and save the key."""
+    s3_key = f"config/logo/{file_name}"
+    try:
+        s3 = get_s3_client()
+        s3.put_object(Bucket=S3_ATTACHMENTS_BUCKET, Key=s3_key, Body=file_bytes, ContentType="image/png")
+        cfg = _get_company_config()
+        cfg["logo_s3_key"] = s3_key
+        save_company_config(cfg)
+        return s3_key
+    except Exception as e:
+        return None
+
+
+def _get_logo_bytes():
+    """Download logo from S3 for PDF embedding."""
+    cfg = _get_company_config()
+    key = cfg.get("logo_s3_key", "")
+    if not key:
+        return None
+    try:
+        s3 = get_s3_client()
+        resp = s3.get_object(Bucket=S3_ATTACHMENTS_BUCKET, Key=key)
+        return resp["Body"].read()
+    except Exception:
+        return None
+
+
 def generate_po_pdf(po_data, po_items, po_type="Material"):
-    """Generate a simple PDF for a PO and upload to S3. Returns the S3 key."""
+    """Generate a professional PO PDF matching the Airvent format."""
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.units import mm
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib import colors
+        from reportlab.lib.enums import TA_RIGHT, TA_CENTER, TA_LEFT
     except ImportError:
         return None
 
+    company = _get_company_config()
+    vendor_name = po_data.get("vendor_name", "")
+    # Try to get vendor details
+    vendors = get_all_vendors() if po_type == "Material" else get_all_service_vendors()
+    vendor_info = {}
+    for v in vendors:
+        if v.get("name", "").lower() == vendor_name.lower() or v.get("vendor_id") == po_data.get("vendor_id"):
+            vendor_info = v
+            break
+
+    po_id = po_data.get("po_id", "")
+    po_date = po_data.get("created_at", _today())[:10]
+    delivery_date = po_data.get("expected_delivery", "")
+    payment_terms = po_data.get("payment_terms", "")
+
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=20*mm, bottomMargin=20*mm)
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
+                             leftMargin=12*mm, rightMargin=12*mm)
     styles = getSampleStyleSheet()
+    small = ParagraphStyle("Small", parent=styles["Normal"], fontSize=7, leading=9)
+    small_bold = ParagraphStyle("SmallBold", parent=small, fontName="Helvetica-Bold")
+    header_style = ParagraphStyle("Header", parent=styles["Normal"], fontSize=8, leading=10)
+    title_style = ParagraphStyle("POTitle", fontSize=16, fontName="Helvetica-Bold", alignment=TA_RIGHT)
+    subtitle = ParagraphStyle("Subtitle", fontSize=11, fontName="Helvetica-Bold", alignment=TA_RIGHT)
+
     elements = []
 
-    # Header
-    elements.append(Paragraph(f"<b>PURCHASE ORDER</b>", styles["Title"]))
-    elements.append(Spacer(1, 5*mm))
-    po_id = po_data.get("po_id", "")
-    elements.append(Paragraph(f"<b>PO Number:</b> {po_id}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Type:</b> {po_type}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Vendor:</b> {po_data.get('vendor_name', '')}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Payment Terms:</b> {po_data.get('payment_terms', '')}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Expected Delivery:</b> {po_data.get('expected_delivery', '')}", styles["Normal"]))
-    elements.append(Paragraph(f"<b>Date:</b> {_today()}", styles["Normal"]))
-    elements.append(Spacer(1, 8*mm))
+    # ─── Header: Logo + PO Title ──────────────────────────────
+    logo_bytes = _get_logo_bytes()
+    header_data = []
+    if logo_bytes:
+        logo_buf = io.BytesIO(logo_bytes)
+        try:
+            logo_img = Image(logo_buf, width=50*mm, height=15*mm)
+            logo_img.hAlign = "LEFT"
+        except Exception:
+            logo_img = Paragraph(f"<b>{company.get('company_name', '')}</b>", styles["Title"])
+        header_data = [[logo_img, "", Paragraph("Purchase Order", title_style)],
+                       ["", "", Paragraph(po_id, subtitle)]]
+    else:
+        header_data = [[Paragraph(f"<b>{company.get('company_name', '')}</b>", styles["Title"]),
+                         "", Paragraph("Purchase Order", title_style)],
+                       ["", "", Paragraph(po_id, subtitle)]]
 
-    # Items table
-    data = [["#", "Description", "Specification", "Qty", "Unit", "Rate (₹)", "Amount (₹)"]]
+    ht = Table(header_data, colWidths=[70*mm, 30*mm, 80*mm])
+    ht.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                             ("LINEBELOW", (0, -1), (-1, -1), 1, colors.black)]))
+    elements.append(ht)
+    elements.append(Spacer(1, 4*mm))
+
+    # ─── Address Block: Buyer | Supplier | Shipping ───────────
+    buyer_text = f"""<b>Name and Address of Buyer</b><br/>
+    <b>{company.get('company_name', '')}</b><br/>
+    {company.get('address', '')}<br/>
+    GSTIN: {company.get('gstin', '')}"""
+
+    supplier_text = f"""<b>Name and Address of Supplier</b><br/>
+    <b>{vendor_name}</b><br/>
+    {vendor_info.get('address', '')}<br/>
+    GSTIN: {vendor_info.get('gst_no', '')}"""
+
+    shipping_text = f"""<b>Shipping Details</b><br/>
+    {company.get('shipping_address', company.get('address', ''))}<br/>
+    GSTIN: {company.get('gstin', '')}"""
+
+    addr_table = Table([
+        [Paragraph(buyer_text, small), Paragraph(supplier_text, small), Paragraph(shipping_text, small)]
+    ], colWidths=[60*mm, 60*mm, 60*mm])
+    addr_table.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.black),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.black),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    elements.append(addr_table)
+    elements.append(Spacer(1, 4*mm))
+
+    # ─── PO Details Block ─────────────────────────────────────
+    num_items = len(po_items)
+    total_amount = sum(i.get("quantity", 0) * i.get("unit_price", i.get("rate", 0)) for i in po_items)
+
+    details_data = [
+        [Paragraph("<b>PO Number</b>", small), Paragraph(po_id, small),
+         Paragraph("<b>PO Date</b>", small), Paragraph(po_date, small)],
+        [Paragraph("<b>Delivery Date</b>", small), Paragraph(str(delivery_date), small),
+         Paragraph("<b>PO Amendment</b>", small), Paragraph("0", small)],
+        [Paragraph("<b>No of Items</b>", small), Paragraph(str(num_items), small),
+         Paragraph("<b>PO Amount</b>", small), Paragraph(f"₹{total_amount:,.2f}", small)],
+        [Paragraph("<b>Payment Terms</b>", small), Paragraph(payment_terms, small), "", ""],
+    ]
+    dt = Table(details_data, colWidths=[35*mm, 55*mm, 35*mm, 55*mm])
+    dt.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.black),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("SPAN", (0, 0), (0, 0)),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    elements.append(Paragraph("<b>PO Details</b>", ParagraphStyle("PDT", fontSize=10, fontName="Helvetica-Bold", alignment=TA_CENTER)))
+    elements.append(dt)
+    elements.append(Spacer(1, 4*mm))
+
+    # ─── Items Table ──────────────────────────────────────────
+    col_widths = [8*mm, 55*mm, 20*mm, 20*mm, 25*mm, 25*mm, 25*mm]
+    item_header = [
+        Paragraph("<b>#</b>", small), Paragraph("<b>Description</b>", small),
+        Paragraph("<b>HSN/SAC</b>", small), Paragraph("<b>Quantity</b>", small),
+        Paragraph("<b>Rate</b>", small), Paragraph("<b>Taxable Amount</b>", small),
+        Paragraph("<b>Total</b>", small),
+    ]
+    item_data = [item_header]
+
     for idx, item in enumerate(po_items, 1):
         qty = item.get("quantity", 0)
         rate = item.get("unit_price", item.get("rate", 0))
-        data.append([str(idx), item.get("description", ""), item.get("specification", ""),
-                      str(qty), item.get("unit", ""), f"{rate:,.2f}", f"{qty * rate:,.2f}"])
+        taxable = qty * rate
+        desc_text = f"{item.get('description', '')}"
+        if item.get("specification"):
+            desc_text += f"<br/><font size='6'>Details: {item.get('specification', '')}</font>"
+        item_data.append([
+            Paragraph(str(idx), small),
+            Paragraph(desc_text, small),
+            Paragraph(item.get("hsn_code", ""), small),
+            Paragraph(f"{qty} {item.get('unit', '')}", small),
+            Paragraph(f"₹{rate:,.2f}", small),
+            Paragraph(f"₹{taxable:,.2f}", small),
+            Paragraph(f"₹{taxable:,.2f}", small),
+        ])
 
-    total = sum(i.get("quantity", 0) * i.get("unit_price", i.get("rate", 0)) for i in po_items)
-    data.append(["", "", "", "", "", "Total", f"{total:,.2f}"])
+    # Total row
+    item_data.append([
+        "", "", "", "", "",
+        Paragraph("<b>Total (before Tax)</b>", small_bold),
+        Paragraph(f"<b>₹{total_amount:,.2f}</b>", small_bold),
+    ])
 
-    t = Table(data, repeatRows=1)
-    t.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e40af")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+    it = Table(item_data, colWidths=col_widths, repeatRows=1)
+    it.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.black),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("ALIGN", (3, 0), (-1, -1), "RIGHT"),
-        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#f1f5f9")),
-        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
     ]))
-    elements.append(t)
-    elements.append(Spacer(1, 10*mm))
+    elements.append(it)
+    elements.append(Spacer(1, 6*mm))
+
+    # Notes
     if po_data.get("notes"):
-        elements.append(Paragraph(f"<b>Notes:</b> {po_data['notes']}", styles["Normal"]))
+        elements.append(Paragraph(f"<b>Notes:</b> {po_data['notes']}", small))
+        elements.append(Spacer(1, 4*mm))
+
+    # T&C + Signature
+    elements.append(Paragraph("<b>Terms And Conditions:</b>", small_bold))
+    elements.append(Paragraph("This is a computer generated document", small))
+    elements.append(Spacer(1, 10*mm))
+    sig_table = Table([["", Paragraph(f"For <b>{company.get('company_name', '')}</b><br/><br/><br/>Authorised Signatory",
+                        ParagraphStyle("Sig", fontSize=8, alignment=TA_CENTER))]],
+                       colWidths=[100*mm, 80*mm])
+    elements.append(sig_table)
 
     doc.build(elements)
     buf.seek(0)
 
-    # Upload to S3
     s3_key = f"po/{po_type.lower()}/{_today()}/{po_id}.pdf"
     try:
         s3 = get_s3_client()
-        s3.put_object(Bucket=S3_PO_PDF_BUCKET, Key=s3_key, Body=buf.getvalue(),
-                       ContentType="application/pdf")
+        s3.put_object(Bucket=S3_PO_PDF_BUCKET, Key=s3_key, Body=buf.getvalue(), ContentType="application/pdf")
         return s3_key
     except Exception as e:
         st.warning(f"S3 upload failed: {e}")
+        return None
+
+
+def generate_delivery_challan(po_data, po_items, challan_number=None):
+    """Generate a Delivery Challan PDF for sending material to service vendor."""
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import mm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_RIGHT, TA_CENTER
+    except ImportError:
+        return None
+
+    company = _get_company_config()
+    po_id = po_data.get("po_id", "")
+    if not challan_number:
+        challan_number = f"DC-{po_id}"
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
+                             leftMargin=12*mm, rightMargin=12*mm)
+    styles = getSampleStyleSheet()
+    small = ParagraphStyle("Small", parent=styles["Normal"], fontSize=8, leading=10)
+    small_bold = ParagraphStyle("SmallBold", parent=small, fontName="Helvetica-Bold")
+
+    elements = []
+
+    # Header
+    logo_bytes = _get_logo_bytes()
+    title_style = ParagraphStyle("DCTitle", fontSize=16, fontName="Helvetica-Bold", alignment=TA_RIGHT)
+    if logo_bytes:
+        logo_buf = io.BytesIO(logo_bytes)
+        try:
+            logo_img = Image(logo_buf, width=50*mm, height=15*mm)
+        except Exception:
+            logo_img = Paragraph(f"<b>{company.get('company_name', '')}</b>", styles["Title"])
+        ht = Table([[logo_img, Paragraph("Delivery Challan", title_style)]], colWidths=[90*mm, 90*mm])
+    else:
+        ht = Table([[Paragraph(f"<b>{company.get('company_name', '')}</b>", styles["Title"]),
+                      Paragraph("Delivery Challan", title_style)]], colWidths=[90*mm, 90*mm])
+    ht.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                             ("LINEBELOW", (0, -1), (-1, -1), 1, colors.black)]))
+    elements.append(ht)
+    elements.append(Spacer(1, 4*mm))
+
+    # Details
+    details = [
+        [Paragraph("<b>Challan No:</b>", small), Paragraph(challan_number, small),
+         Paragraph("<b>Date:</b>", small), Paragraph(_today(), small)],
+        [Paragraph("<b>PO Reference:</b>", small), Paragraph(po_id, small),
+         Paragraph("<b>Vendor:</b>", small), Paragraph(po_data.get("vendor_name", ""), small)],
+        [Paragraph("<b>From:</b>", small), Paragraph(company.get("address", ""), small),
+         Paragraph("<b>To:</b>", small), Paragraph(po_data.get("vendor_address", ""), small)],
+    ]
+    dt = Table(details, colWidths=[25*mm, 65*mm, 25*mm, 65*mm])
+    dt.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.5, colors.black),
+                             ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                             ("TOPPADDING", (0, 0), (-1, -1), 3),
+                             ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]))
+    elements.append(dt)
+    elements.append(Spacer(1, 4*mm))
+
+    # Items
+    item_header = [Paragraph("<b>Sl No</b>", small_bold), Paragraph("<b>Item Name</b>", small_bold),
+                    Paragraph("<b>HSN Code</b>", small_bold), Paragraph("<b>Quantity</b>", small_bold),
+                    Paragraph("<b>Unit</b>", small_bold)]
+    item_data = [item_header]
+    for idx, item in enumerate(po_items, 1):
+        item_data.append([
+            Paragraph(str(idx), small),
+            Paragraph(item.get("description", item.get("item_name", "")), small),
+            Paragraph(item.get("hsn_code", ""), small),
+            Paragraph(str(item.get("quantity", 0)), small),
+            Paragraph(item.get("unit", ""), small),
+        ])
+
+    it = Table(item_data, colWidths=[15*mm, 80*mm, 25*mm, 25*mm, 25*mm], repeatRows=1)
+    it.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.black),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    elements.append(it)
+    elements.append(Spacer(1, 10*mm))
+
+    # Signatures
+    sig = Table([
+        [Paragraph("Prepared By: ________________", small),
+         Paragraph("Received By: ________________", small)],
+        [Paragraph(f"\n\nFor <b>{company.get('company_name', '')}</b>", small), ""],
+    ], colWidths=[90*mm, 90*mm])
+    elements.append(sig)
+
+    doc.build(elements)
+    buf.seek(0)
+
+    s3_key = f"challans/{_today()}/{challan_number}.pdf"
+    try:
+        s3 = get_s3_client()
+        s3.put_object(Bucket=S3_PO_PDF_BUCKET, Key=s3_key, Body=buf.getvalue(), ContentType="application/pdf")
+        return s3_key
+    except Exception:
         return None
 
 
@@ -418,7 +811,7 @@ def add_master_item(item_name, vendor, category, sub_category, specification, un
     db = get_dynamodb()
     table = db.Table(TABLES["master_items"])
     item = _to_decimal({
-        "item_id": _gen_id("MI-"), "item_name": item_name, "vendor": vendor,
+        "item_id": _next_sequential_id("MI-"), "item_name": item_name, "vendor": vendor,
         "category": category, "sub_category": sub_category, "specification": specification,
         "unit": unit, "location": location, "price": price, "revised_price": revised_price,
         "remarks": remarks, "created_at": _now(), "updated_at": _now(),
@@ -462,9 +855,15 @@ def get_master_items_by_vendor(vendor_name):
     return [i for i in items if i.get("vendor", "").lower() == vendor_name.lower()]
 
 def bulk_upload_master_items(items_list):
+    """Bulk upload master items. Auto-creates vendors (deduplicated)."""
+    # Collect unique vendor names and create them first
+    vendor_names = set(str(item.get("vendor", "")).strip() for item in items_list if item.get("vendor", "").strip())
+    for vname in vendor_names:
+        ensure_vendor_exists(vname)
+    # Now upload items
     results = []
     for item in items_list:
-        r = add_master_item(item.get("item_name", ""), item.get("vendor", ""),
+        r = add_master_item(item.get("item_name", ""), str(item.get("vendor", "")).strip(),
             item.get("category", ""), item.get("sub_category", ""),
             item.get("specification", ""), item.get("unit", "Nos"),
             item.get("location", "Main Store"), float(item.get("price", 0)),
@@ -516,7 +915,7 @@ def add_boq_item(project_id, master_item_id, item_name, vendor, category, sub_ca
         "master_item_id": master_item_id, "item_name": item_name, "vendor": vendor,
         "category": category, "sub_category": sub_category,
         "specification": specification, "quantity": quantity, "unit": unit,
-        "rate": rate, "total": quantity * rate, "created_at": _now(),
+        "rate": rate, "total": quantity * rate, "staged": False, "created_at": _now(),
     })
     table.put_item(Item=item)
     return _from_decimal(item)
@@ -526,6 +925,22 @@ def get_boq_items(project_id):
     table = db.Table(TABLES["boq_items"])
     resp = table.query(KeyConditionExpression=Key("project_id").eq(project_id))
     return [_from_decimal(i) for i in resp.get("Items", [])]
+
+def get_unstaged_boq_items(project_id):
+    """Get only BOQ items that haven't been staged yet."""
+    all_items = get_boq_items(project_id)
+    return [i for i in all_items if not i.get("staged", False)]
+
+def mark_boq_items_staged(project_id, item_ids):
+    """Mark specific BOQ items as staged."""
+    db = get_dynamodb()
+    table = db.Table(TABLES["boq_items"])
+    for item_id in item_ids:
+        table.update_item(
+            Key={"project_id": project_id, "item_id": item_id},
+            UpdateExpression="SET staged = :s",
+            ExpressionAttributeValues={":s": True},
+        )
 
 def delete_boq_item(project_id, item_id):
     db = get_dynamodb()
@@ -628,16 +1043,20 @@ def get_service_vendor_services(vendor_id):
 #  ORDER STAGING — fixed reserved keyword 'items'
 # ═══════════════════════════════════════════════════════════════════
 def create_staged_orders_from_boq(project_id):
-    boq_items = get_boq_items(project_id)
+    """Stage only NEW (unstaged) BOQ items. Already-staged items are skipped."""
+    unstaged = get_unstaged_boq_items(project_id)
+    if not unstaged:
+        return []
     db = get_dynamodb()
     table = db.Table(TABLES["order_staging"])
     vendor_groups = {}
-    for item in boq_items:
+    for item in unstaged:
         vendor = item.get("vendor", "Unknown")
         if vendor not in vendor_groups:
             vendor_groups[vendor] = []
         vendor_groups[vendor].append(item)
     staged = []
+    staged_item_ids = []
     for vendor_name, vitems in vendor_groups.items():
         stage_id = _gen_id("STG-")
         total = sum(i.get("total", 0) for i in vitems)
@@ -649,6 +1068,10 @@ def create_staged_orders_from_boq(project_id):
         })
         table.put_item(Item=entry)
         staged.append(_from_decimal(entry))
+        staged_item_ids.extend([i["item_id"] for i in vitems])
+    # Mark all these BOQ items as staged
+    if staged_item_ids:
+        mark_boq_items_staged(project_id, staged_item_ids)
     return staged
 
 def get_staged_orders(project_id=None):
@@ -697,7 +1120,7 @@ def create_raw_material_po(project_id, vendor_id, vendor_name, payment_terms, ex
     db = get_dynamodb()
     po_table = db.Table(TABLES["raw_material_po"])
     items_table = db.Table(TABLES["raw_material_po_items"])
-    po_id = _gen_id("RMPO-")
+    po_id = _next_po_id("RMPO-")
     total_amount = sum(i["quantity"] * i["unit_price"] for i in items)
     po = _to_decimal({"po_id": po_id, "project_id": project_id, "vendor_id": vendor_id,
             "vendor_name": vendor_name, "payment_terms": payment_terms,
@@ -758,7 +1181,30 @@ def update_po_pdf_key(po_id, pdf_key, table_key="raw_material_po"):
         ExpressionAttributeValues={":pk": pdf_key})
 
 def place_po_via_sqs(po_id, vendor_email, vendor_name, items, total_amount, payment_terms, expected_delivery):
+    """Place PO: update status + send email to vendor + notify management."""
     update_raw_material_po_status(po_id, "Placed")
+    po_data = get_raw_material_po(po_id)
+    po_items = get_raw_material_po_items(po_id)
+    # Email vendor
+    if vendor_email:
+        send_po_email(po_data or {}, po_items or items, vendor_email, "Material")
+    # Email management
+    cfg = get_email_config()
+    mgmt = cfg.get("management_emails", [])
+    sender = cfg.get("sender_email", "")
+    company = cfg.get("company_name", "FabriFlow")
+    if mgmt and sender:
+        html = f"""<div style="font-family:Arial,sans-serif;padding:20px">
+            <h3>📦 Material PO Placed: {po_id}</h3>
+            <p><strong>Vendor:</strong> {vendor_name}</p>
+            <p><strong>Amount:</strong> ₹{total_amount:,.2f}</p>
+            <p><strong>Payment:</strong> {payment_terms}</p>
+            <p><strong>Expected Delivery:</strong> {expected_delivery}</p>
+            <p style="color:#64748b;font-size:0.85rem">— {company} ERP</p>
+        </div>"""
+        for m in mgmt:
+            if m:
+                send_email(m, f"PO Placed: {po_id} — {vendor_name}", html, sender)
     return True
 
 
@@ -769,7 +1215,7 @@ def create_service_po(project_id, vendor_id, vendor_name, payment_terms, expecte
     db = get_dynamodb()
     po_table = db.Table(TABLES["service_po"])
     items_table = db.Table(TABLES["service_po_items"])
-    po_id = _gen_id("SPO-")
+    po_id = _next_po_id("SPO-")
     total_amount = sum(s["quantity"] * s["unit_price"] for s in services)
     po = _to_decimal({"po_id": po_id, "project_id": project_id, "vendor_id": vendor_id,
             "vendor_name": vendor_name, "payment_terms": payment_terms,
@@ -820,26 +1266,69 @@ def update_service_po_status(po_id, status):
         ExpressionAttributeValues={":s": status, ":u": _now()})
 
 def place_service_po_via_sqs(po_id, vendor_email, vendor_name, services, total_amount, payment_terms, expected_delivery):
+    """Place Service PO: update status + send email to vendor + notify management."""
     update_service_po_status(po_id, "Placed")
+    po_data = {"po_id": po_id, "vendor_name": vendor_name, "payment_terms": payment_terms,
+               "expected_delivery": expected_delivery, "total_amount": total_amount}
+    spo_items = get_service_po_items(po_id)
+    if vendor_email:
+        send_po_email(po_data, spo_items or services, vendor_email, "Service")
+    cfg = get_email_config()
+    mgmt = cfg.get("management_emails", [])
+    sender = cfg.get("sender_email", "")
+    company = cfg.get("company_name", "FabriFlow")
+    if mgmt and sender:
+        html = f"""<div style="font-family:Arial,sans-serif;padding:20px">
+            <h3>🛠️ Service PO Placed: {po_id}</h3>
+            <p><strong>Vendor:</strong> {vendor_name}</p>
+            <p><strong>Amount:</strong> ₹{total_amount:,.2f}</p>
+            <p><strong>Payment:</strong> {payment_terms}</p>
+            <p><strong>Expected Return:</strong> {expected_delivery}</p>
+            <p style="color:#64748b;font-size:0.85rem">— {company} ERP</p>
+        </div>"""
+        for m in mgmt:
+            if m:
+                send_email(m, f"Service PO Placed: {po_id} — {vendor_name}", html, sender)
     return True
 
 
 # ═══════════════════════════════════════════════════════════════════
 #  INVENTORY
 # ═══════════════════════════════════════════════════════════════════
-def add_inventory_item(master_item_id, item_name, vendor, category, sub_category,
+def add_inventory_item(master_item_id, item_name, category, sub_category,
                        specification, quantity, unit, location, price, remarks=""):
+    """Add a brand new inventory item (used when manually adding stock)."""
     db = get_dynamodb()
     table = db.Table(TABLES["inventory"])
     item = _to_decimal({
         "item_id": _gen_id("INV-"), "master_item_id": master_item_id,
-        "item_name": item_name, "vendor": vendor, "category": category,
+        "item_name": item_name, "category": category,
         "sub_category": sub_category, "specification": specification,
         "quantity": quantity, "unit": unit, "location": location,
         "price": price, "remarks": remarks, "updated_at": _now(),
     })
     table.put_item(Item=item)
     return _from_decimal(item)
+
+
+def receive_to_inventory(item_name, category, sub_category, specification, quantity, unit,
+                         location="Main Store", price=0):
+    """Receive material into inventory. Aggregates with existing stock by
+    item_name + specification + category (vendor-agnostic).
+    If a matching entry exists, increments its quantity.
+    If not, creates a new entry."""
+    inventory = get_all_inventory()
+    # Find match by name + spec + category (ignore vendor)
+    for inv in inventory:
+        if (inv.get("item_name", "").lower().strip() == item_name.lower().strip()
+            and inv.get("specification", "").lower().strip() == specification.lower().strip()
+            and inv.get("category", "").lower().strip() == category.lower().strip()):
+            # Found match — increment quantity
+            update_inventory_qty(inv["item_id"], quantity)
+            return inv
+    # No match — create new entry (no vendor field)
+    return add_inventory_item("", item_name, category, sub_category,
+                              specification, quantity, unit, location, price)
 
 def get_all_inventory():
     return _scan_all(TABLES["inventory"])
@@ -959,3 +1448,59 @@ def get_dispatched_goods(project_id=None):
         resp = table.scan(FilterExpression=Attr("project_id").eq(project_id))
         return [_from_decimal(i) for i in resp.get("Items", [])]
     return _scan_all(TABLES["dispatched_goods"])
+
+# ═══════════════════════════════════════════════════════════════════
+#  SCRAP INVENTORY
+# ═══════════════════════════════════════════════════════════════════
+def add_scrap_item(item_name, category, specification, quantity, unit, source_po="", notes=""):
+    db = get_dynamodb()
+    table = db.Table(TABLES["scrap_inventory"])
+    item = _to_decimal({
+        "item_id": _gen_id("SCR-"), "item_name": item_name, "category": category,
+        "specification": specification, "quantity": quantity, "unit": unit,
+        "source_po": source_po, "notes": notes, "added_at": _now(),
+    })
+    table.put_item(Item=item)
+    return _from_decimal(item)
+
+def get_all_scrap():
+    return _scan_all(TABLES["scrap_inventory"])
+
+def update_scrap_qty(item_id, quantity_change):
+    db = get_dynamodb()
+    table = db.Table(TABLES["scrap_inventory"])
+    table.update_item(Key={"item_id": item_id},
+        UpdateExpression="SET quantity = quantity + :q",
+        ExpressionAttributeValues={":q": Decimal(str(quantity_change))})
+
+def delete_scrap_item(item_id):
+    db = get_dynamodb()
+    table = db.Table(TABLES["scrap_inventory"])
+    table.delete_item(Key={"item_id": item_id})
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  SERVICE PO — Inventory Linkage (issue material to service vendor)
+# ═══════════════════════════════════════════════════════════════════
+def issue_material_to_service_vendor(po_id, inventory_items):
+    """Deduct material from raw inventory for a service PO.
+    inventory_items = [{"item_id": "INV-xxx", "item_name": "...", "quantity": 10, "unit": "Kg"}, ...]"""
+    for it in inventory_items:
+        update_inventory_qty(it["item_id"], -it["quantity"])
+    # Store what was issued on the PO record
+    db = get_dynamodb()
+    table = db.Table(TABLES["service_po"])
+    table.update_item(Key={"po_id": po_id},
+        UpdateExpression="SET issued_material = :im, updated_at = :u",
+        ExpressionAttributeValues={":im": _to_decimal(inventory_items), ":u": _now()})
+
+
+def receive_scrap_from_service(po_id, scrap_items):
+    """Receive scrap back from service vendor. Adds to scrap inventory.
+    scrap_items = [{"item_name": "...", "quantity": 5, "unit": "Kg", "notes": "offcuts"}, ...]"""
+    for item in scrap_items:
+        add_scrap_item(
+            item.get("item_name", ""), item.get("category", "Scrap"),
+            item.get("specification", ""), item.get("quantity", 0),
+            item.get("unit", "Kg"), po_id, item.get("notes", ""),
+        )
