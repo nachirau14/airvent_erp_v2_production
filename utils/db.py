@@ -117,6 +117,44 @@ def _scan_all(table_name):
     return [_from_decimal(i) for i in items]
 
 
+# ─── Cached Data Access ──────────────────────────────────────
+# Uses @st.cache_data with TTL to avoid re-scanning DynamoDB on every render.
+# Write operations call clear_cache() to invalidate stale data.
+
+CACHE_TTL = 60  # seconds — data is reloaded from DynamoDB at most every 60s
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _cached_scan(table_name):
+    """Cached version of _scan_all. Keyed by table name."""
+    return _scan_all(table_name)
+
+
+def clear_cache(table_name=None):
+    """Clear cached data. Call after any write operation.
+    If table_name is None, clears all cached scans."""
+    try:
+        _cached_scan.clear()
+    except Exception:
+        pass
+
+
+def _invalidate_and_scan(table_name):
+    """Clear cache for a table and return fresh data."""
+    clear_cache()
+    return _scan_all(table_name)
+
+
+def _write_and_clear(func):
+    """Decorator: clears the scan cache after any function that writes to DynamoDB."""
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        clear_cache()
+        return result
+    wrapper.__name__ = func.__name__
+    wrapper.__doc__ = func.__doc__
+    return wrapper
+
+
 def bulk_delete_all(table_name, key_fields):
     """Delete ALL items from a DynamoDB table. key_fields = list of key attribute names."""
     db = get_dynamodb()
@@ -807,6 +845,7 @@ def send_weekly_digest(pos_received, management_emails):
 # ═══════════════════════════════════════════════════════════════════
 #  MASTER ITEMS
 # ═══════════════════════════════════════════════════════════════════
+@_write_and_clear
 def add_master_item(item_name, vendor, category, sub_category, specification, unit, location, price, revised_price=0, remarks=""):
     db = get_dynamodb()
     table = db.Table(TABLES["master_items"])
@@ -820,7 +859,7 @@ def add_master_item(item_name, vendor, category, sub_category, specification, un
     return _from_decimal(item)
 
 def get_all_master_items():
-    return _scan_all(TABLES["master_items"])
+    return _cached_scan(TABLES["master_items"])
 
 def get_master_item(item_id):
     db = get_dynamodb()
@@ -829,6 +868,7 @@ def get_master_item(item_id):
     item = resp.get("Item")
     return _from_decimal(item) if item else None
 
+@_write_and_clear
 def update_master_item(item_id, updates):
     db = get_dynamodb()
     table = db.Table(TABLES["master_items"])
@@ -845,6 +885,7 @@ def update_master_item(item_id, updates):
         UpdateExpression="SET " + ", ".join(expr_parts),
         ExpressionAttributeNames=expr_names, ExpressionAttributeValues=expr_values)
 
+@_write_and_clear
 def delete_master_item(item_id):
     db = get_dynamodb()
     table = db.Table(TABLES["master_items"])
@@ -854,6 +895,7 @@ def get_master_items_by_vendor(vendor_name):
     items = get_all_master_items()
     return [i for i in items if i.get("vendor", "").lower() == vendor_name.lower()]
 
+@_write_and_clear
 def bulk_upload_master_items(items_list):
     """Bulk upload master items. Auto-creates vendors (deduplicated)."""
     # Collect unique vendor names and create them first
@@ -875,6 +917,7 @@ def bulk_upload_master_items(items_list):
 # ═══════════════════════════════════════════════════════════════════
 #  PROJECTS
 # ═══════════════════════════════════════════════════════════════════
+@_write_and_clear
 def create_project(name, client_name, description, product_type, status="Planning"):
     db = get_dynamodb()
     table = db.Table(TABLES["projects"])
@@ -885,7 +928,7 @@ def create_project(name, client_name, description, product_type, status="Plannin
     return item
 
 def get_all_projects():
-    return _scan_all(TABLES["projects"])
+    return _cached_scan(TABLES["projects"])
 
 def get_project(project_id):
     db = get_dynamodb()
@@ -894,6 +937,7 @@ def get_project(project_id):
     item = resp.get("Item")
     return _from_decimal(item) if item else None
 
+@_write_and_clear
 def update_project_status(project_id, status):
     db = get_dynamodb()
     table = db.Table(TABLES["projects"])
@@ -906,6 +950,7 @@ def update_project_status(project_id, status):
 # ═══════════════════════════════════════════════════════════════════
 #  BOQ ITEMS
 # ═══════════════════════════════════════════════════════════════════
+@_write_and_clear
 def add_boq_item(project_id, master_item_id, item_name, vendor, category, sub_category,
                  specification, quantity, unit, rate):
     db = get_dynamodb()
@@ -931,6 +976,7 @@ def get_unstaged_boq_items(project_id):
     all_items = get_boq_items(project_id)
     return [i for i in all_items if not i.get("staged", False)]
 
+@_write_and_clear
 def mark_boq_items_staged(project_id, item_ids):
     """Mark specific BOQ items as staged."""
     db = get_dynamodb()
@@ -942,11 +988,13 @@ def mark_boq_items_staged(project_id, item_ids):
             ExpressionAttributeValues={":s": True},
         )
 
+@_write_and_clear
 def delete_boq_item(project_id, item_id):
     db = get_dynamodb()
     table = db.Table(TABLES["boq_items"])
     table.delete_item(Key={"project_id": project_id, "item_id": item_id})
 
+@_write_and_clear
 def update_boq_item(project_id, item_id, quantity, rate):
     db = get_dynamodb()
     table = db.Table(TABLES["boq_items"])
@@ -960,6 +1008,7 @@ def update_boq_item(project_id, item_id, quantity, rate):
 # ═══════════════════════════════════════════════════════════════════
 #  VENDORS
 # ═══════════════════════════════════════════════════════════════════
+@_write_and_clear
 def add_vendor(name, contact_person="—", phone="—", email="—", address="—", gst_no="—", payment_terms="Credit - 30 Days"):
     db = get_dynamodb()
     table = db.Table(TABLES["vendors"])
@@ -970,7 +1019,7 @@ def add_vendor(name, contact_person="—", phone="—", email="—", address="�
     return item
 
 def get_all_vendors():
-    return _scan_all(TABLES["vendors"])
+    return _cached_scan(TABLES["vendors"])
 
 def get_vendor(vendor_id):
     db = get_dynamodb()
@@ -979,6 +1028,7 @@ def get_vendor(vendor_id):
     item = resp.get("Item")
     return _from_decimal(item) if item else None
 
+@_write_and_clear
 def update_vendor(vendor_id, updates):
     db = get_dynamodb()
     table = db.Table(TABLES["vendors"])
@@ -992,6 +1042,7 @@ def update_vendor(vendor_id, updates):
         UpdateExpression="SET " + ", ".join(expr_parts),
         ExpressionAttributeNames=expr_names, ExpressionAttributeValues=expr_values)
 
+@_write_and_clear
 def ensure_vendor_exists(vendor_name):
     """Auto-create vendor if it doesn't exist. Returns vendor record."""
     vendors = get_all_vendors()
@@ -1004,6 +1055,7 @@ def ensure_vendor_exists(vendor_name):
 # ═══════════════════════════════════════════════════════════════════
 #  SERVICE VENDORS
 # ═══════════════════════════════════════════════════════════════════
+@_write_and_clear
 def add_service_vendor(name, contact_person, phone, email, address, gst_no, payment_terms):
     db = get_dynamodb()
     table = db.Table(TABLES["service_vendors"])
@@ -1014,7 +1066,7 @@ def add_service_vendor(name, contact_person, phone, email, address, gst_no, paym
     return item
 
 def get_all_service_vendors():
-    return _scan_all(TABLES["service_vendors"])
+    return _cached_scan(TABLES["service_vendors"])
 
 def get_service_vendor(vendor_id):
     db = get_dynamodb()
@@ -1023,6 +1075,7 @@ def get_service_vendor(vendor_id):
     item = resp.get("Item")
     return _from_decimal(item) if item else None
 
+@_write_and_clear
 def add_service_vendor_service(vendor_id, service_name, description, unit, rate):
     db = get_dynamodb()
     table = db.Table(TABLES["service_vendor_services"])
@@ -1042,6 +1095,7 @@ def get_service_vendor_services(vendor_id):
 # ═══════════════════════════════════════════════════════════════════
 #  ORDER STAGING — fixed reserved keyword 'items'
 # ═══════════════════════════════════════════════════════════════════
+@_write_and_clear
 def create_staged_orders_from_boq(project_id):
     """Stage only NEW (unstaged) BOQ items. Already-staged items are skipped."""
     unstaged = get_unstaged_boq_items(project_id)
@@ -1090,6 +1144,7 @@ def get_staged_order(stage_id):
     item = resp.get("Item")
     return _from_decimal(item) if item else None
 
+@_write_and_clear
 def update_staged_order_items(stage_id, line_items, total_amount):
     db = get_dynamodb()
     table = db.Table(TABLES["order_staging"])
@@ -1099,6 +1154,7 @@ def update_staged_order_items(stage_id, line_items, total_amount):
         ExpressionAttributeValues={":i": _to_decimal(line_items),
                                    ":t": Decimal(str(total_amount)), ":u": _now()})
 
+@_write_and_clear
 def update_staged_order_status(stage_id, status):
     db = get_dynamodb()
     table = db.Table(TABLES["order_staging"])
@@ -1107,6 +1163,7 @@ def update_staged_order_status(stage_id, status):
         ExpressionAttributeNames={"#s": "status"},
         ExpressionAttributeValues={":s": status, ":u": _now()})
 
+@_write_and_clear
 def delete_staged_order(stage_id):
     db = get_dynamodb()
     table = db.Table(TABLES["order_staging"])
@@ -1116,6 +1173,7 @@ def delete_staged_order(stage_id):
 # ═══════════════════════════════════════════════════════════════════
 #  RAW MATERIAL PURCHASE ORDERS
 # ═══════════════════════════════════════════════════════════════════
+@_write_and_clear
 def create_raw_material_po(project_id, vendor_id, vendor_name, payment_terms, expected_delivery, items, notes=""):
     db = get_dynamodb()
     po_table = db.Table(TABLES["raw_material_po"])
@@ -1143,7 +1201,7 @@ def get_all_raw_material_pos(project_id=None):
         table = db.Table(TABLES["raw_material_po"])
         resp = table.scan(FilterExpression=Attr("project_id").eq(project_id))
         return [_from_decimal(i) for i in resp.get("Items", [])]
-    return _scan_all(TABLES["raw_material_po"])
+    return _cached_scan(TABLES["raw_material_po"])
 
 def get_raw_material_po(po_id):
     db = get_dynamodb()
@@ -1158,6 +1216,7 @@ def get_raw_material_po_items(po_id):
     resp = table.query(KeyConditionExpression=Key("po_id").eq(po_id))
     return [_from_decimal(i) for i in resp.get("Items", [])]
 
+@_write_and_clear
 def update_po_item_receipt(po_id, item_id, quantity_received, received=False):
     db = get_dynamodb()
     table = db.Table(TABLES["raw_material_po_items"])
@@ -1165,6 +1224,7 @@ def update_po_item_receipt(po_id, item_id, quantity_received, received=False):
         UpdateExpression="SET quantity_received = :qr, received = :r",
         ExpressionAttributeValues={":qr": Decimal(str(quantity_received)), ":r": received})
 
+@_write_and_clear
 def update_raw_material_po_status(po_id, status):
     db = get_dynamodb()
     table = db.Table(TABLES["raw_material_po"])
@@ -1180,6 +1240,7 @@ def update_po_pdf_key(po_id, pdf_key, table_key="raw_material_po"):
         UpdateExpression="SET pdf_key = :pk",
         ExpressionAttributeValues={":pk": pdf_key})
 
+@_write_and_clear
 def place_po_via_sqs(po_id, vendor_email, vendor_name, items, total_amount, payment_terms, expected_delivery):
     """Place PO: update status + send email to vendor + notify management."""
     update_raw_material_po_status(po_id, "Placed")
@@ -1211,6 +1272,7 @@ def place_po_via_sqs(po_id, vendor_email, vendor_name, items, total_amount, paym
 # ═══════════════════════════════════════════════════════════════════
 #  SERVICE PURCHASE ORDERS
 # ═══════════════════════════════════════════════════════════════════
+@_write_and_clear
 def create_service_po(project_id, vendor_id, vendor_name, payment_terms, expected_delivery, services, notes=""):
     db = get_dynamodb()
     po_table = db.Table(TABLES["service_po"])
@@ -1240,7 +1302,7 @@ def get_all_service_pos(project_id=None):
         table = db.Table(TABLES["service_po"])
         resp = table.scan(FilterExpression=Attr("project_id").eq(project_id))
         return [_from_decimal(i) for i in resp.get("Items", [])]
-    return _scan_all(TABLES["service_po"])
+    return _cached_scan(TABLES["service_po"])
 
 def get_service_po_items(po_id):
     db = get_dynamodb()
@@ -1248,6 +1310,7 @@ def get_service_po_items(po_id):
     resp = table.query(KeyConditionExpression=Key("po_id").eq(po_id))
     return [_from_decimal(i) for i in resp.get("Items", [])]
 
+@_write_and_clear
 def update_service_po_item(po_id, item_id, quantity_received, received, finishing_status, finishing_comment, scrap_received, scrap_usable, scrap_notes):
     db = get_dynamodb()
     table = db.Table(TABLES["service_po_items"])
@@ -1257,6 +1320,7 @@ def update_service_po_item(po_id, item_id, quantity_received, received, finishin
             ":fs": finishing_status, ":fc": finishing_comment,
             ":sr": Decimal(str(scrap_received)), ":su": scrap_usable, ":sn": scrap_notes})
 
+@_write_and_clear
 def update_service_po_status(po_id, status):
     db = get_dynamodb()
     table = db.Table(TABLES["service_po"])
@@ -1265,6 +1329,7 @@ def update_service_po_status(po_id, status):
         ExpressionAttributeNames={"#s": "status"},
         ExpressionAttributeValues={":s": status, ":u": _now()})
 
+@_write_and_clear
 def place_service_po_via_sqs(po_id, vendor_email, vendor_name, services, total_amount, payment_terms, expected_delivery):
     """Place Service PO: update status + send email to vendor + notify management."""
     update_service_po_status(po_id, "Placed")
@@ -1295,6 +1360,7 @@ def place_service_po_via_sqs(po_id, vendor_email, vendor_name, services, total_a
 # ═══════════════════════════════════════════════════════════════════
 #  INVENTORY
 # ═══════════════════════════════════════════════════════════════════
+@_write_and_clear
 def add_inventory_item(master_item_id, item_name, category, sub_category,
                        specification, quantity, unit, location, price, remarks=""):
     """Add a brand new inventory item (used when manually adding stock)."""
@@ -1311,6 +1377,7 @@ def add_inventory_item(master_item_id, item_name, category, sub_category,
     return _from_decimal(item)
 
 
+@_write_and_clear
 def receive_to_inventory(item_name, category, sub_category, specification, quantity, unit,
                          location="Main Store", price=0):
     """Receive material into inventory. Aggregates with existing stock by
@@ -1331,7 +1398,7 @@ def receive_to_inventory(item_name, category, sub_category, specification, quant
                               specification, quantity, unit, location, price)
 
 def get_all_inventory():
-    return _scan_all(TABLES["inventory"])
+    return _cached_scan(TABLES["inventory"])
 
 def get_inventory_item(item_id):
     db = get_dynamodb()
@@ -1340,6 +1407,7 @@ def get_inventory_item(item_id):
     item = resp.get("Item")
     return _from_decimal(item) if item else None
 
+@_write_and_clear
 def update_inventory_qty(item_id, quantity_change):
     db = get_dynamodb()
     table = db.Table(TABLES["inventory"])
@@ -1347,6 +1415,7 @@ def update_inventory_qty(item_id, quantity_change):
         UpdateExpression="SET quantity = quantity + :q, updated_at = :u",
         ExpressionAttributeValues={":q": Decimal(str(quantity_change)), ":u": _now()})
 
+@_write_and_clear
 def delete_inventory_item(item_id):
     db = get_dynamodb()
     table = db.Table(TABLES["inventory"])
@@ -1356,6 +1425,7 @@ def delete_inventory_item(item_id):
 # ═══════════════════════════════════════════════════════════════════
 #  PRODUCTION TRACKING
 # ═══════════════════════════════════════════════════════════════════
+@_write_and_clear
 def create_production_tracker(project_id, product_name, product_type, quantity, stages):
     db = get_dynamodb()
     table = db.Table(TABLES["production_tracking"])
@@ -1372,6 +1442,7 @@ def get_production_trackers(project_id):
     resp = table.query(KeyConditionExpression=Key("project_id").eq(project_id))
     return [_from_decimal(i) for i in resp.get("Items", [])]
 
+@_write_and_clear
 def update_production_stage(project_id, product_id, stage_name, new_status):
     db = get_dynamodb()
     table = db.Table(TABLES["production_tracking"])
@@ -1384,6 +1455,7 @@ def update_production_stage(project_id, product_id, stage_name, new_status):
 # ═══════════════════════════════════════════════════════════════════
 #  MATERIAL ISSUES
 # ═══════════════════════════════════════════════════════════════════
+@_write_and_clear
 def create_material_issue(project_id, product_id, items, issued_by):
     db = get_dynamodb()
     table = db.Table(TABLES["material_issues"])
@@ -1401,12 +1473,13 @@ def get_material_issues(project_id=None):
         table = db.Table(TABLES["material_issues"])
         resp = table.scan(FilterExpression=Attr("project_id").eq(project_id))
         return [_from_decimal(i) for i in resp.get("Items", [])]
-    return _scan_all(TABLES["material_issues"])
+    return _cached_scan(TABLES["material_issues"])
 
 
 # ═══════════════════════════════════════════════════════════════════
 #  FINISHED GOODS & DISPATCH
 # ═══════════════════════════════════════════════════════════════════
+@_write_and_clear
 def add_finished_good(project_id, product_id, product_name, quantity, notes=""):
     db = get_dynamodb()
     table = db.Table(TABLES["finished_goods"])
@@ -1422,8 +1495,9 @@ def get_finished_goods(project_id=None):
         table = db.Table(TABLES["finished_goods"])
         resp = table.scan(FilterExpression=Attr("project_id").eq(project_id))
         return [_from_decimal(i) for i in resp.get("Items", [])]
-    return _scan_all(TABLES["finished_goods"])
+    return _cached_scan(TABLES["finished_goods"])
 
+@_write_and_clear
 def update_finished_good_status(fg_id, status):
     db = get_dynamodb()
     table = db.Table(TABLES["finished_goods"])
@@ -1431,6 +1505,7 @@ def update_finished_good_status(fg_id, status):
         UpdateExpression="SET #s = :s", ExpressionAttributeNames={"#s": "status"},
         ExpressionAttributeValues={":s": status})
 
+@_write_and_clear
 def dispatch_goods(project_id, fg_ids, dispatch_to, vehicle_no, notes=""):
     db = get_dynamodb()
     table = db.Table(TABLES["dispatched_goods"])
@@ -1447,11 +1522,12 @@ def get_dispatched_goods(project_id=None):
         table = db.Table(TABLES["dispatched_goods"])
         resp = table.scan(FilterExpression=Attr("project_id").eq(project_id))
         return [_from_decimal(i) for i in resp.get("Items", [])]
-    return _scan_all(TABLES["dispatched_goods"])
+    return _cached_scan(TABLES["dispatched_goods"])
 
 # ═══════════════════════════════════════════════════════════════════
 #  SCRAP INVENTORY
 # ═══════════════════════════════════════════════════════════════════
+@_write_and_clear
 def add_scrap_item(item_name, category, specification, quantity, unit, source_po="", notes=""):
     db = get_dynamodb()
     table = db.Table(TABLES["scrap_inventory"])
@@ -1464,8 +1540,9 @@ def add_scrap_item(item_name, category, specification, quantity, unit, source_po
     return _from_decimal(item)
 
 def get_all_scrap():
-    return _scan_all(TABLES["scrap_inventory"])
+    return _cached_scan(TABLES["scrap_inventory"])
 
+@_write_and_clear
 def update_scrap_qty(item_id, quantity_change):
     db = get_dynamodb()
     table = db.Table(TABLES["scrap_inventory"])
@@ -1473,6 +1550,7 @@ def update_scrap_qty(item_id, quantity_change):
         UpdateExpression="SET quantity = quantity + :q",
         ExpressionAttributeValues={":q": Decimal(str(quantity_change))})
 
+@_write_and_clear
 def delete_scrap_item(item_id):
     db = get_dynamodb()
     table = db.Table(TABLES["scrap_inventory"])
@@ -1482,6 +1560,7 @@ def delete_scrap_item(item_id):
 # ═══════════════════════════════════════════════════════════════════
 #  SERVICE PO — Inventory Linkage (issue material to service vendor)
 # ═══════════════════════════════════════════════════════════════════
+@_write_and_clear
 def issue_material_to_service_vendor(po_id, inventory_items):
     """Deduct material from raw inventory for a service PO.
     inventory_items = [{"item_id": "INV-xxx", "item_name": "...", "quantity": 10, "unit": "Kg"}, ...]"""
