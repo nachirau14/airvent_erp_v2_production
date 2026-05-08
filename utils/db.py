@@ -134,6 +134,10 @@ def clear_cache(table_name=None):
     If table_name is None, clears all cached scans."""
     try:
         _cached_scan.clear()
+        get_raw_material_po_items.clear()
+        get_service_po_items.clear()
+        list_attachments.clear()
+        get_po_pdf_download.clear()
     except Exception:
         pass
 
@@ -573,7 +577,7 @@ def generate_delivery_challan(po_data, po_items, challan_number=None):
     except Exception:
         return None
 
-
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_po_pdf_download(s3_key):
     """Download PDF bytes from S3 for display."""
     try:
@@ -583,7 +587,7 @@ def get_po_pdf_download(s3_key):
     except Exception:
         return None
 
-
+@_write_and_clear  # <-- Add this decorator
 def upload_attachment(po_id, file_name, file_bytes, content_type="application/octet-stream"):
     """Upload an attachment to persistent S3 bucket. Returns S3 key."""
     s3_key = f"attachments/{po_id}/{file_name}"
@@ -596,7 +600,7 @@ def upload_attachment(po_id, file_name, file_bytes, content_type="application/oc
         st.warning(f"Attachment upload failed: {e}")
         return None
 
-
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_attachment(s3_key):
     """Download attachment bytes from S3."""
     try:
@@ -606,7 +610,7 @@ def get_attachment(s3_key):
     except Exception:
         return None
 
-
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def list_attachments(po_id):
     """List all attachments for a PO."""
     try:
@@ -1210,6 +1214,7 @@ def get_raw_material_po(po_id):
     item = resp.get("Item")
     return _from_decimal(item) if item else None
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_raw_material_po_items(po_id):
     db = get_dynamodb()
     table = db.Table(TABLES["raw_material_po_items"])
@@ -1233,6 +1238,7 @@ def update_raw_material_po_status(po_id, status):
         ExpressionAttributeNames={"#s": "status"},
         ExpressionAttributeValues={":s": status, ":u": _now()})
 
+@_write_and_clear  # <-- Add this decorator
 def update_po_pdf_key(po_id, pdf_key, table_key="raw_material_po"):
     db = get_dynamodb()
     table = db.Table(TABLES[table_key])
@@ -1304,6 +1310,7 @@ def get_all_service_pos(project_id=None):
         return [_from_decimal(i) for i in resp.get("Items", [])]
     return _cached_scan(TABLES["service_po"])
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_service_po_items(po_id):
     db = get_dynamodb()
     table = db.Table(TABLES["service_po_items"])
