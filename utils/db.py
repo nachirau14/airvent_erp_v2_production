@@ -134,10 +134,6 @@ def clear_cache(table_name=None):
     If table_name is None, clears all cached scans."""
     try:
         _cached_scan.clear()
-        get_raw_material_po_items.clear()
-        get_service_po_items.clear()
-        list_attachments.clear()
-        get_po_pdf_download.clear()
     except Exception:
         pass
 
@@ -374,6 +370,12 @@ def generate_po_pdf(po_data, po_items, po_type="Material"):
     # ─── PO Details Block ─────────────────────────────────────
     num_items = len(po_items)
     total_amount = sum(i.get("quantity", 0) * i.get("unit_price", i.get("rate", 0)) for i in po_items)
+    gst_pct = po_data.get("gst_percentage", 18)
+    gst_half = gst_pct / 2  # CGST and SGST each
+    gst_amount = total_amount * gst_pct / 100
+    cgst_amount = gst_amount / 2
+    sgst_amount = gst_amount / 2
+    grand_total = total_amount + gst_amount
 
     details_data = [
         [Paragraph("<b>PO Number</b>", small), Paragraph(po_id, small),
@@ -381,7 +383,7 @@ def generate_po_pdf(po_data, po_items, po_type="Material"):
         [Paragraph("<b>Delivery Date</b>", small), Paragraph(str(delivery_date), small),
          Paragraph("<b>PO Amendment</b>", small), Paragraph("0", small)],
         [Paragraph("<b>No of Items</b>", small), Paragraph(str(num_items), small),
-         Paragraph("<b>PO Amount</b>", small), Paragraph(f"₹{total_amount:,.2f}", small)],
+         Paragraph("<b>PO Amount</b>", small), Paragraph(f"INR {grand_total:,.2f}", small)],
         [Paragraph("<b>Payment Terms</b>", small), Paragraph(payment_terms, small), "", ""],
     ]
     dt = Table(details_data, colWidths=[35*mm, 55*mm, 35*mm, 55*mm])
@@ -397,11 +399,13 @@ def generate_po_pdf(po_data, po_items, po_type="Material"):
     elements.append(Spacer(1, 4*mm))
 
     # ─── Items Table ──────────────────────────────────────────
-    col_widths = [8*mm, 55*mm, 20*mm, 20*mm, 25*mm, 25*mm, 25*mm]
+    col_widths = [8*mm, 50*mm, 20*mm, 20*mm, 22*mm, 18*mm, 18*mm, 22*mm]
     item_header = [
         Paragraph("<b>#</b>", small), Paragraph("<b>Description</b>", small),
         Paragraph("<b>HSN/SAC</b>", small), Paragraph("<b>Quantity</b>", small),
-        Paragraph("<b>Rate</b>", small), Paragraph("<b>Taxable Amount</b>", small),
+        Paragraph("<b>Rate</b>", small),
+        Paragraph(f"<b>CGST ({gst_half:.0f}%)</b>", small),
+        Paragraph(f"<b>SGST ({gst_half:.0f}%)</b>", small),
         Paragraph("<b>Total</b>", small),
     ]
     item_data = [item_header]
@@ -410,6 +414,9 @@ def generate_po_pdf(po_data, po_items, po_type="Material"):
         qty = item.get("quantity", 0)
         rate = item.get("unit_price", item.get("rate", 0))
         taxable = qty * rate
+        item_cgst = taxable * gst_half / 100
+        item_sgst = taxable * gst_half / 100
+        item_total = taxable + item_cgst + item_sgst
         desc_text = f"{item.get('description', '')}"
         if item.get("specification"):
             desc_text += f"<br/><font size='6'>Details: {item.get('specification', '')}</font>"
@@ -418,17 +425,28 @@ def generate_po_pdf(po_data, po_items, po_type="Material"):
             Paragraph(desc_text, small),
             Paragraph(item.get("hsn_code", ""), small),
             Paragraph(f"{qty} {item.get('unit', '')}", small),
-            Paragraph(f"₹{rate:,.2f}", small),
-            Paragraph(f"₹{taxable:,.2f}", small),
-            Paragraph(f"₹{taxable:,.2f}", small),
+            Paragraph(f"INR {rate:,.2f}", small),
+            Paragraph(f"INR {item_cgst:,.2f}", small),
+            Paragraph(f"INR {item_sgst:,.2f}", small),
+            Paragraph(f"INR {item_total:,.2f}", small),
         ])
 
-    # Total row
-    item_data.append([
-        "", "", "", "", "",
-        Paragraph("<b>Total (before Tax)</b>", small_bold),
-        Paragraph(f"<b>₹{total_amount:,.2f}</b>", small_bold),
-    ])
+    # Total rows
+    item_data.append(["", "", "", "", "",
+        Paragraph("<b>Total (before Tax)</b>", small_bold), "",
+        Paragraph(f"<b>INR {total_amount:,.2f}</b>", small_bold)])
+    item_data.append(["", "", "", "", "",
+        Paragraph(f"<b>CGST ({gst_half:.0f}%)</b>", small_bold), "",
+        Paragraph(f"<b>INR {cgst_amount:,.2f}</b>", small_bold)])
+    item_data.append(["", "", "", "", "",
+        Paragraph(f"<b>SGST ({gst_half:.0f}%)</b>", small_bold), "",
+        Paragraph(f"<b>INR {sgst_amount:,.2f}</b>", small_bold)])
+    item_data.append(["", "", "", "", "",
+        Paragraph(f"<b>Total Tax ({gst_pct:.0f}%)</b>", small_bold), "",
+        Paragraph(f"<b>INR {gst_amount:,.2f}</b>", small_bold)])
+    item_data.append(["", "", "", "", "",
+        Paragraph("<b>Grand Total</b>", small_bold), "",
+        Paragraph(f"<b>INR {grand_total:,.2f}</b>", small_bold)])
 
     it = Table(item_data, colWidths=col_widths, repeatRows=1)
     it.setStyle(TableStyle([
@@ -439,7 +457,8 @@ def generate_po_pdf(po_data, po_items, po_type="Material"):
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
+        ("ALIGN", (4, 1), (-1, -1), "RIGHT"),
+        ("BACKGROUND", (0, -5), (-1, -1), colors.HexColor("#f8f8f8")),
     ]))
     elements.append(it)
     elements.append(Spacer(1, 6*mm))
@@ -577,7 +596,7 @@ def generate_delivery_challan(po_data, po_items, challan_number=None):
     except Exception:
         return None
 
-@st.cache_data(ttl=3600, show_spinner=False)
+
 def get_po_pdf_download(s3_key):
     """Download PDF bytes from S3 for display."""
     try:
@@ -587,7 +606,7 @@ def get_po_pdf_download(s3_key):
     except Exception:
         return None
 
-@_write_and_clear  # <-- Add this decorator
+
 def upload_attachment(po_id, file_name, file_bytes, content_type="application/octet-stream"):
     """Upload an attachment to persistent S3 bucket. Returns S3 key."""
     s3_key = f"attachments/{po_id}/{file_name}"
@@ -600,7 +619,7 @@ def upload_attachment(po_id, file_name, file_bytes, content_type="application/oc
         st.warning(f"Attachment upload failed: {e}")
         return None
 
-@st.cache_data(ttl=3600, show_spinner=False)
+
 def get_attachment(s3_key):
     """Download attachment bytes from S3."""
     try:
@@ -610,7 +629,7 @@ def get_attachment(s3_key):
     except Exception:
         return None
 
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+
 def list_attachments(po_id):
     """List all attachments for a PO."""
     try:
@@ -1178,7 +1197,7 @@ def delete_staged_order(stage_id):
 #  RAW MATERIAL PURCHASE ORDERS
 # ═══════════════════════════════════════════════════════════════════
 @_write_and_clear
-def create_raw_material_po(project_id, vendor_id, vendor_name, payment_terms, expected_delivery, items, notes=""):
+def create_raw_material_po(project_id, vendor_id, vendor_name, payment_terms, expected_delivery, items, notes="", gst_percentage=18):
     db = get_dynamodb()
     po_table = db.Table(TABLES["raw_material_po"])
     items_table = db.Table(TABLES["raw_material_po_items"])
@@ -1187,6 +1206,7 @@ def create_raw_material_po(project_id, vendor_id, vendor_name, payment_terms, ex
     po = _to_decimal({"po_id": po_id, "project_id": project_id, "vendor_id": vendor_id,
             "vendor_name": vendor_name, "payment_terms": payment_terms,
             "expected_delivery": expected_delivery, "total_amount": total_amount,
+            "gst_percentage": gst_percentage,
             "status": "Draft", "notes": notes, "email_sent": False,
             "pdf_key": "", "created_at": _now(), "updated_at": _now()})
     po_table.put_item(Item=po)
@@ -1214,7 +1234,6 @@ def get_raw_material_po(po_id):
     item = resp.get("Item")
     return _from_decimal(item) if item else None
 
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_raw_material_po_items(po_id):
     db = get_dynamodb()
     table = db.Table(TABLES["raw_material_po_items"])
@@ -1238,7 +1257,6 @@ def update_raw_material_po_status(po_id, status):
         ExpressionAttributeNames={"#s": "status"},
         ExpressionAttributeValues={":s": status, ":u": _now()})
 
-@_write_and_clear  # <-- Add this decorator
 def update_po_pdf_key(po_id, pdf_key, table_key="raw_material_po"):
     db = get_dynamodb()
     table = db.Table(TABLES[table_key])
@@ -1279,7 +1297,7 @@ def place_po_via_sqs(po_id, vendor_email, vendor_name, items, total_amount, paym
 #  SERVICE PURCHASE ORDERS
 # ═══════════════════════════════════════════════════════════════════
 @_write_and_clear
-def create_service_po(project_id, vendor_id, vendor_name, payment_terms, expected_delivery, services, notes=""):
+def create_service_po(project_id, vendor_id, vendor_name, payment_terms, expected_delivery, services, notes="", gst_percentage=18):
     db = get_dynamodb()
     po_table = db.Table(TABLES["service_po"])
     items_table = db.Table(TABLES["service_po_items"])
@@ -1288,6 +1306,7 @@ def create_service_po(project_id, vendor_id, vendor_name, payment_terms, expecte
     po = _to_decimal({"po_id": po_id, "project_id": project_id, "vendor_id": vendor_id,
             "vendor_name": vendor_name, "payment_terms": payment_terms,
             "expected_delivery": expected_delivery, "total_amount": total_amount,
+            "gst_percentage": gst_percentage,
             "status": "Draft", "notes": notes, "email_sent": False,
             "pdf_key": "", "created_at": _now(), "updated_at": _now()})
     po_table.put_item(Item=po)
@@ -1310,7 +1329,6 @@ def get_all_service_pos(project_id=None):
         return [_from_decimal(i) for i in resp.get("Items", [])]
     return _cached_scan(TABLES["service_po"])
 
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def get_service_po_items(po_id):
     db = get_dynamodb()
     table = db.Table(TABLES["service_po_items"])
