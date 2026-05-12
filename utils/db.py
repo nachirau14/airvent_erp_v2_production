@@ -129,11 +129,39 @@ def _cached_scan(table_name):
     return _scan_all(table_name)
 
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _cached_query(table_name, key_name, key_value):
+    """Cached DynamoDB query by partition key."""
+    db = get_dynamodb()
+    table = db.Table(table_name)
+    resp = table.query(KeyConditionExpression=Key(key_name).eq(key_value))
+    return [_from_decimal(i) for i in resp.get("Items", [])]
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def _cached_get_item(table_name, key_dict_json):
+    """Cached DynamoDB get_item. key_dict_json is JSON string of the key."""
+    import json as _json
+    key = _json.loads(key_dict_json)
+    db = get_dynamodb()
+    table = db.Table(table_name)
+    resp = table.get_item(Key=key)
+    item = resp.get("Item")
+    return _from_decimal(item) if item else None
+
+
 def clear_cache(table_name=None):
-    """Clear cached data. Call after any write operation.
-    If table_name is None, clears all cached scans."""
+    """Clear ALL cached data. Call after any write operation."""
     try:
         _cached_scan.clear()
+    except Exception:
+        pass
+    try:
+        _cached_query.clear()
+    except Exception:
+        pass
+    try:
+        _cached_get_item.clear()
     except Exception:
         pass
 
@@ -218,6 +246,7 @@ def reset_counter(counter_name):
 # ═══════════════════════════════════════════════════════════════════
 #  S3 — PDF Generation & Attachments
 # ═══════════════════════════════════════════════════════════════════
+@st.cache_data(ttl=300, show_spinner=False)
 def _get_company_config():
     """Get company config (name, address, GSTIN, logo S3 key)."""
     try:
@@ -245,6 +274,7 @@ def save_company_config(config):
     config["config_id"] = "main"
     config["updated_at"] = _now()
     table.put_item(Item=config)
+    _get_company_config.clear()
 
 
 def upload_company_logo(file_bytes, file_name):
@@ -650,6 +680,7 @@ def get_ses_client():
     return boto3.client("ses", **_get_aws_config())
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_email_config():
     """Get email config from DynamoDB. Returns dict or defaults."""
     try:
@@ -679,6 +710,7 @@ def save_email_config(config):
         config["config_id"] = "main"
         config["updated_at"] = _now()
         table.put_item(Item=config)
+        get_email_config.clear()
         return True
     except Exception as e:
         st.error(f"Failed to save config: {e}")
@@ -885,11 +917,7 @@ def get_all_master_items():
     return _cached_scan(TABLES["master_items"])
 
 def get_master_item(item_id):
-    db = get_dynamodb()
-    table = db.Table(TABLES["master_items"])
-    resp = table.get_item(Key={"item_id": item_id})
-    item = resp.get("Item")
-    return _from_decimal(item) if item else None
+    return _cached_get_item(TABLES["master_items"], json.dumps({"item_id": item_id}))
 
 @_write_and_clear
 def update_master_item(item_id, updates):
@@ -954,11 +982,7 @@ def get_all_projects():
     return _cached_scan(TABLES["projects"])
 
 def get_project(project_id):
-    db = get_dynamodb()
-    table = db.Table(TABLES["projects"])
-    resp = table.get_item(Key={"project_id": project_id})
-    item = resp.get("Item")
-    return _from_decimal(item) if item else None
+    return _cached_get_item(TABLES["projects"], json.dumps({"project_id": project_id}))
 
 @_write_and_clear
 def update_project_status(project_id, status):
@@ -989,10 +1013,7 @@ def add_boq_item(project_id, master_item_id, item_name, vendor, category, sub_ca
     return _from_decimal(item)
 
 def get_boq_items(project_id):
-    db = get_dynamodb()
-    table = db.Table(TABLES["boq_items"])
-    resp = table.query(KeyConditionExpression=Key("project_id").eq(project_id))
-    return [_from_decimal(i) for i in resp.get("Items", [])]
+    return _cached_query(TABLES["boq_items"], "project_id", project_id)
 
 def get_unstaged_boq_items(project_id):
     """Get only BOQ items that haven't been staged yet."""
@@ -1045,11 +1066,7 @@ def get_all_vendors():
     return _cached_scan(TABLES["vendors"])
 
 def get_vendor(vendor_id):
-    db = get_dynamodb()
-    table = db.Table(TABLES["vendors"])
-    resp = table.get_item(Key={"vendor_id": vendor_id})
-    item = resp.get("Item")
-    return _from_decimal(item) if item else None
+    return _cached_get_item(TABLES["vendors"], json.dumps({"vendor_id": vendor_id}))
 
 @_write_and_clear
 def update_vendor(vendor_id, updates):
@@ -1092,11 +1109,7 @@ def get_all_service_vendors():
     return _cached_scan(TABLES["service_vendors"])
 
 def get_service_vendor(vendor_id):
-    db = get_dynamodb()
-    table = db.Table(TABLES["service_vendors"])
-    resp = table.get_item(Key={"vendor_id": vendor_id})
-    item = resp.get("Item")
-    return _from_decimal(item) if item else None
+    return _cached_get_item(TABLES["service_vendors"], json.dumps({"vendor_id": vendor_id}))
 
 @_write_and_clear
 def add_service_vendor_service(vendor_id, service_name, description, unit, rate):
@@ -1109,10 +1122,7 @@ def add_service_vendor_service(vendor_id, service_name, description, unit, rate)
     return _from_decimal(item)
 
 def get_service_vendor_services(vendor_id):
-    db = get_dynamodb()
-    table = db.Table(TABLES["service_vendor_services"])
-    resp = table.query(KeyConditionExpression=Key("vendor_id").eq(vendor_id))
-    return [_from_decimal(i) for i in resp.get("Items", [])]
+    return _cached_query(TABLES["service_vendor_services"], "vendor_id", vendor_id)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1228,17 +1238,10 @@ def get_all_raw_material_pos(project_id=None):
     return _cached_scan(TABLES["raw_material_po"])
 
 def get_raw_material_po(po_id):
-    db = get_dynamodb()
-    table = db.Table(TABLES["raw_material_po"])
-    resp = table.get_item(Key={"po_id": po_id})
-    item = resp.get("Item")
-    return _from_decimal(item) if item else None
+    return _cached_get_item(TABLES["raw_material_po"], json.dumps({"po_id": po_id}))
 
 def get_raw_material_po_items(po_id):
-    db = get_dynamodb()
-    table = db.Table(TABLES["raw_material_po_items"])
-    resp = table.query(KeyConditionExpression=Key("po_id").eq(po_id))
-    return [_from_decimal(i) for i in resp.get("Items", [])]
+    return _cached_query(TABLES["raw_material_po_items"], "po_id", po_id)
 
 @_write_and_clear
 def update_po_item_receipt(po_id, item_id, quantity_received, received=False):
@@ -1354,10 +1357,7 @@ def get_all_service_pos(project_id=None):
     return _cached_scan(TABLES["service_po"])
 
 def get_service_po_items(po_id):
-    db = get_dynamodb()
-    table = db.Table(TABLES["service_po_items"])
-    resp = table.query(KeyConditionExpression=Key("po_id").eq(po_id))
-    return [_from_decimal(i) for i in resp.get("Items", [])]
+    return _cached_query(TABLES["service_po_items"], "po_id", po_id)
 
 @_write_and_clear
 def update_service_po_item(po_id, item_id, quantity_received, received, finishing_status, finishing_comment, scrap_received, scrap_usable, scrap_notes):
@@ -1450,11 +1450,7 @@ def get_all_inventory():
     return _cached_scan(TABLES["inventory"])
 
 def get_inventory_item(item_id):
-    db = get_dynamodb()
-    table = db.Table(TABLES["inventory"])
-    resp = table.get_item(Key={"item_id": item_id})
-    item = resp.get("Item")
-    return _from_decimal(item) if item else None
+    return _cached_get_item(TABLES["inventory"], json.dumps({"item_id": item_id}))
 
 @_write_and_clear
 def update_inventory_qty(item_id, quantity_change):
@@ -1491,10 +1487,7 @@ def create_production_tracker(project_id, product_name, product_type, quantity, 
     return _from_decimal(item)
 
 def get_production_trackers(project_id):
-    db = get_dynamodb()
-    table = db.Table(TABLES["production_tracking"])
-    resp = table.query(KeyConditionExpression=Key("project_id").eq(project_id))
-    return [_from_decimal(i) for i in resp.get("Items", [])]
+    return _cached_query(TABLES["production_tracking"], "project_id", project_id)
 
 @_write_and_clear
 def update_production_stage(project_id, product_id, stage_name, new_status):
