@@ -1463,6 +1463,11 @@ def update_inventory_qty(item_id, quantity_change):
     table.update_item(Key={"item_id": item_id},
         UpdateExpression="SET quantity = quantity + :q, updated_at = :u",
         ExpressionAttributeValues={":q": Decimal(str(quantity_change)), ":u": _now()})
+    # Auto-delete if stock is now 0 or below
+    resp = table.get_item(Key={"item_id": item_id})
+    item = resp.get("Item")
+    if item and float(item.get("quantity", 0)) <= 0:
+        table.delete_item(Key={"item_id": item_id})
 
 @_write_and_clear
 def delete_inventory_item(item_id):
@@ -1598,6 +1603,11 @@ def update_scrap_qty(item_id, quantity_change):
     table.update_item(Key={"item_id": item_id},
         UpdateExpression="SET quantity = quantity + :q",
         ExpressionAttributeValues={":q": Decimal(str(quantity_change))})
+    # Auto-delete if stock is now 0 or below
+    resp = table.get_item(Key={"item_id": item_id})
+    item = resp.get("Item")
+    if item and float(item.get("quantity", 0)) <= 0:
+        table.delete_item(Key={"item_id": item_id})
 
 @_write_and_clear
 def delete_scrap_item(item_id):
