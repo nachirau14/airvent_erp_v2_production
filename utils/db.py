@@ -1091,6 +1091,12 @@ def ensure_vendor_exists(vendor_name):
             return v
     return add_vendor(vendor_name)
 
+@_write_and_clear
+def delete_vendor(vendor_id):
+    db = get_dynamodb()
+    table = db.Table(TABLES["vendors"])
+    table.delete_item(Key={"vendor_id": vendor_id})
+
 
 # ═══════════════════════════════════════════════════════════════════
 #  SERVICE VENDORS
@@ -1110,6 +1116,26 @@ def get_all_service_vendors():
 
 def get_service_vendor(vendor_id):
     return _cached_get_item(TABLES["service_vendors"], json.dumps({"vendor_id": vendor_id}))
+
+@_write_and_clear
+def update_service_vendor(vendor_id, updates):
+    db = get_dynamodb()
+    table = db.Table(TABLES["service_vendors"])
+    expr_parts, expr_values, expr_names = [], {}, {}
+    for k, v in updates.items():
+        safe = f"#sv_{k}"
+        expr_names[safe] = k
+        expr_parts.append(f"{safe} = :{k}")
+        expr_values[f":{k}"] = v
+    table.update_item(Key={"vendor_id": vendor_id},
+        UpdateExpression="SET " + ", ".join(expr_parts),
+        ExpressionAttributeNames=expr_names, ExpressionAttributeValues=expr_values)
+
+@_write_and_clear
+def delete_service_vendor(vendor_id):
+    db = get_dynamodb()
+    table = db.Table(TABLES["service_vendors"])
+    table.delete_item(Key={"vendor_id": vendor_id})
 
 @_write_and_clear
 def add_service_vendor_service(vendor_id, service_name, description, unit, rate):
