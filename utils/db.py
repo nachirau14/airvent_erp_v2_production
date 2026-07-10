@@ -123,6 +123,17 @@ def _scan_all(table_name):
 
 CACHE_TTL = 60  # seconds — data is reloaded from DynamoDB at most every 60s
 
+# Per-run memory store: avoids even cache deserialization on repeated calls
+# within the same Streamlit script run (which happens A LOT — pages call
+# get_all_vendors() 2-3 times each). Cleared automatically on each new run.
+_RUN_STORE = {}
+
+def _get_from_run_store(key, loader):
+    """Return data from per-run memory if available, else call loader and store."""
+    if key not in _RUN_STORE:
+        _RUN_STORE[key] = loader()
+    return _RUN_STORE[key]
+
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def _cached_scan(table_name):
     """Cached version of _scan_all. Keyed by table name."""
@@ -152,6 +163,8 @@ def _cached_get_item(table_name, key_dict_json):
 
 def clear_cache(table_name=None):
     """Clear ALL cached data. Call after any write operation."""
+    global _RUN_STORE
+    _RUN_STORE = {}
     try:
         _cached_scan.clear()
     except Exception:
@@ -914,7 +927,7 @@ def add_master_item(item_name, vendor, category, sub_category, specification, un
     return _from_decimal(item)
 
 def get_all_master_items():
-    return _cached_scan(TABLES["master_items"])
+    return _get_from_run_store("master_items", lambda: _cached_scan(TABLES["master_items"]))
 
 def get_master_item(item_id):
     return _cached_get_item(TABLES["master_items"], json.dumps({"item_id": item_id}))
@@ -979,7 +992,7 @@ def create_project(name, client_name, description, product_type, status="Plannin
     return item
 
 def get_all_projects():
-    return _cached_scan(TABLES["projects"])
+    return _get_from_run_store("projects", lambda: _cached_scan(TABLES["projects"]))
 
 def get_project(project_id):
     return _cached_get_item(TABLES["projects"], json.dumps({"project_id": project_id}))
@@ -1013,7 +1026,7 @@ def add_boq_item(project_id, master_item_id, item_name, vendor, category, sub_ca
     return _from_decimal(item)
 
 def get_boq_items(project_id):
-    return _cached_query(TABLES["boq_items"], "project_id", project_id)
+    return _get_from_run_store(f"boq_{project_id}", lambda: _cached_query(TABLES["boq_items"], "project_id", project_id))
 
 def get_unstaged_boq_items(project_id):
     """Get only BOQ items that haven't been staged yet."""
@@ -1063,7 +1076,7 @@ def add_vendor(name, contact_person="—", phone="—", email="—", address="�
     return item
 
 def get_all_vendors():
-    return _cached_scan(TABLES["vendors"])
+    return _get_from_run_store("vendors", lambda: _cached_scan(TABLES["vendors"]))
 
 def get_vendor(vendor_id):
     return _cached_get_item(TABLES["vendors"], json.dumps({"vendor_id": vendor_id}))
@@ -1112,7 +1125,7 @@ def add_service_vendor(name, contact_person, phone, email, address, gst_no, paym
     return item
 
 def get_all_service_vendors():
-    return _cached_scan(TABLES["service_vendors"])
+    return _get_from_run_store("service_vendors", lambda: _cached_scan(TABLES["service_vendors"]))
 
 def get_service_vendor(vendor_id):
     return _cached_get_item(TABLES["service_vendors"], json.dumps({"vendor_id": vendor_id}))
@@ -1261,7 +1274,7 @@ def get_all_raw_material_pos(project_id=None):
         table = db.Table(TABLES["raw_material_po"])
         resp = table.scan(FilterExpression=Attr("project_id").eq(project_id))
         return [_from_decimal(i) for i in resp.get("Items", [])]
-    return _cached_scan(TABLES["raw_material_po"])
+    return _get_from_run_store("rm_pos", lambda: _cached_scan(TABLES["raw_material_po"]))
 
 def get_raw_material_po(po_id):
     return _cached_get_item(TABLES["raw_material_po"], json.dumps({"po_id": po_id}))
@@ -1380,7 +1393,7 @@ def get_all_service_pos(project_id=None):
         table = db.Table(TABLES["service_po"])
         resp = table.scan(FilterExpression=Attr("project_id").eq(project_id))
         return [_from_decimal(i) for i in resp.get("Items", [])]
-    return _cached_scan(TABLES["service_po"])
+    return _get_from_run_store("svc_pos", lambda: _cached_scan(TABLES["service_po"]))
 
 def get_service_po_items(po_id):
     return _cached_query(TABLES["service_po_items"], "po_id", po_id)
@@ -1473,7 +1486,7 @@ def receive_to_inventory(item_name, category, sub_category, specification, quant
                               specification, quantity, unit, location, price)
 
 def get_all_inventory():
-    return _cached_scan(TABLES["inventory"])
+    return _get_from_run_store("inventory", lambda: _cached_scan(TABLES["inventory"]))
 
 def get_inventory_item(item_id):
     return _cached_get_item(TABLES["inventory"], json.dumps({"item_id": item_id}))
@@ -1546,7 +1559,7 @@ def get_material_issues(project_id=None):
         table = db.Table(TABLES["material_issues"])
         resp = table.scan(FilterExpression=Attr("project_id").eq(project_id))
         return [_from_decimal(i) for i in resp.get("Items", [])]
-    return _cached_scan(TABLES["material_issues"])
+    return _get_from_run_store("mat_issues", lambda: _cached_scan(TABLES["material_issues"]))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1568,7 +1581,7 @@ def get_finished_goods(project_id=None):
         table = db.Table(TABLES["finished_goods"])
         resp = table.scan(FilterExpression=Attr("project_id").eq(project_id))
         return [_from_decimal(i) for i in resp.get("Items", [])]
-    return _cached_scan(TABLES["finished_goods"])
+    return _get_from_run_store("fg", lambda: _cached_scan(TABLES["finished_goods"]))
 
 @_write_and_clear
 def update_finished_good_status(fg_id, status):
@@ -1595,7 +1608,7 @@ def get_dispatched_goods(project_id=None):
         table = db.Table(TABLES["dispatched_goods"])
         resp = table.scan(FilterExpression=Attr("project_id").eq(project_id))
         return [_from_decimal(i) for i in resp.get("Items", [])]
-    return _cached_scan(TABLES["dispatched_goods"])
+    return _get_from_run_store("dispatched", lambda: _cached_scan(TABLES["dispatched_goods"]))
 
 # ═══════════════════════════════════════════════════════════════════
 #  SCRAP INVENTORY
@@ -1613,7 +1626,7 @@ def add_scrap_item(item_name, category, specification, quantity, unit, source_po
     return _from_decimal(item)
 
 def get_all_scrap():
-    return _cached_scan(TABLES["scrap_inventory"])
+    return _get_from_run_store("scrap", lambda: _cached_scan(TABLES["scrap_inventory"]))
 
 @_write_and_clear
 def update_scrap_qty(item_id, quantity_change):
