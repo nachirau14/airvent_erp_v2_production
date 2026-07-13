@@ -1466,6 +1466,21 @@ def add_inventory_item(master_item_id, item_name, category, sub_category,
 
 
 @_write_and_clear
+@_write_and_clear
+def deduct_from_inventory(item_name, category, specification, quantity):
+    """Deduct qty from the inventory record matching name+spec+category
+    (same matching rule as receive_to_inventory). No-op if no match exists.
+    Used when a PO receipt is corrected downward after reopening."""
+    inventory = get_all_inventory()
+    for inv in inventory:
+        if (inv.get("item_name", "").lower().strip() == item_name.lower().strip()
+            and inv.get("specification", "").lower().strip() == specification.lower().strip()
+            and inv.get("category", "").lower().strip() == category.lower().strip()):
+            update_inventory_qty(inv["item_id"], -quantity)
+            return True
+    return False
+
+
 def receive_to_inventory(item_name, category, sub_category, specification, quantity, unit,
                          location="Main Store", price=0):
     """Receive material into inventory. Aggregates with existing stock by
