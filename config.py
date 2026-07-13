@@ -23,6 +23,7 @@ TABLES = {
     "order_staging": "erp_order_staging",
     "email_config": "erp_email_config",
     "scrap_inventory": "erp_scrap_inventory",
+    "issued_material": "erp_issued_material",
     "company_config": "erp_company_config",
 }
 

@@ -2,7 +2,7 @@
 import streamlit as st
 import pandas as pd
 from utils.db import (get_all_projects, get_production_trackers, get_all_inventory,
-                       create_material_issue, get_material_issues)
+                       create_material_issue, get_all_issued_material)
 from utils.ui_helpers import section_header, empty_state
 
 
@@ -50,6 +50,8 @@ def render():
             if st.button("Add", key=f"ia_{item['item_id']}"):
                 if qty > 0:
                     st.session_state.issue_items.append({"item_id": item["item_id"], "item_name": item["item_name"],
+                        "specification": item.get("specification", ""), "category": item.get("category", ""),
+                        "sub_category": item.get("sub_category", ""),
                         "quantity": qty, "unit": item.get("unit",""), "inventory_type": "raw"})
                     st.rerun()
 
@@ -67,3 +69,19 @@ def render():
                 r = create_material_issue(project["project_id"], product_id, st.session_state.issue_items, issued_by)
                 st.success(f"Issued! ID: `{r['issue_id']}`"); st.session_state.issue_items = []; st.rerun()
             else: st.error("'Issued By' required.")
+
+    # ─── Issued Material Log (auto-purged after 15 days) ─────────
+    st.markdown("---")
+    st.markdown("### 📋 Issued Material Log")
+    st.caption("Entries auto-delete 15 days after issue (DynamoDB TTL).")
+    issued = get_all_issued_material()
+    if issued:
+        df = pd.DataFrame(sorted(issued, key=lambda x: x.get("issued_at", ""), reverse=True))
+        cols = ["item_name", "specification", "quantity", "unit", "project_id", "issued_by", "issued_at"]
+        available = [c for c in cols if c in df.columns]
+        if "issued_at" in df.columns:
+            df["issued_at"] = df["issued_at"].str[:16].str.replace("T", " ")
+        st.dataframe(df[available], use_container_width=True, hide_index=True, height=300)
+        st.caption(f"{len(issued)} record(s) currently in the log")
+    else:
+        st.info("No material issued in the last 15 days.")

@@ -1,13 +1,12 @@
 """
-Password authentication for the ERP app.
-Passwords are stored as SHA-256 hashes in st.secrets.
+Password authentication — reads SHA-256 hash from Streamlit secrets.
+secrets.toml:  [auth] management_password_hash / production_password_hash
 """
 import streamlit as st
 import hashlib
 
 
 def hash_password(password):
-    """Return SHA-256 hash of a password."""
     return hashlib.sha256(password.encode()).hexdigest()
 
 
@@ -31,24 +30,22 @@ def check_auth(app_name="management"):
         submitted = st.form_submit_button("🔐 Login", use_container_width=True)
 
         if submitted:
-            secret_key = f"{app_name}_password_hash"
-            stored_hash = st.secrets.get("auth", {}).get(secret_key, "")
-
+            try:
+                stored_hash = st.secrets.get("auth", {}).get(f"{app_name}_password_hash", "")
+            except Exception:
+                stored_hash = ""
             if not stored_hash:
-                st.error("No password configured. Add auth section to secrets.toml")
+                st.error(f"No password configured. Add [auth] {app_name}_password_hash to secrets.toml.")
                 return False
-
             if hash_password(password) == stored_hash:
                 st.session_state["authenticated"] = True
                 st.rerun()
             else:
                 st.error("Incorrect password")
                 return False
-
     return False
 
 
 def logout():
-    """Clear authentication state."""
     st.session_state["authenticated"] = False
     st.rerun()
