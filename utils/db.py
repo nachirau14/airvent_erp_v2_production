@@ -109,10 +109,11 @@ def _from_decimal(obj):
 def _scan_all(table_name):
     db = get_dynamodb()
     table = db.Table(table_name)
-    resp = table.scan()
+    # ConsistentRead so rows written milliseconds ago are always visible
+    resp = table.scan(ConsistentRead=True)
     items = resp.get("Items", [])
     while "LastEvaluatedKey" in resp:
-        resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
+        resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"], ConsistentRead=True)
         items.extend(resp.get("Items", []))
     return [_from_decimal(i) for i in items]
 
@@ -127,6 +128,14 @@ CACHE_TTL = 60  # seconds — data is reloaded from DynamoDB at most every 60s
 # within the same Streamlit script run (which happens A LOT — pages call
 # get_all_vendors() 2-3 times each). Cleared automatically on each new run.
 _RUN_STORE = {}
+
+def clear_run_store():
+    """Reset the per-run memo. MUST be called at the top of app.py on every
+    script run — otherwise this dict outlives the rerun (modules persist for
+    the whole Streamlit process) and serves stale data indefinitely,
+    including writes made by the OTHER app (management vs production)."""
+    global _RUN_STORE
+    _RUN_STORE = {}
 
 def _get_from_run_store(key, loader):
     """Return data from per-run memory if available, else call loader and store."""
@@ -1466,6 +1475,21 @@ def add_inventory_item(master_item_id, item_name, category, sub_category,
 
 
 @_write_and_clear
+@_write_and_clear
+def deduct_from_inventory(item_name, category, specification, quantity):
+    """Deduct qty from the inventory record matching name+spec+category
+    (same matching rule as receive_to_inventory). No-op if no match exists.
+    Used when a PO receipt is corrected downward after reopening."""
+    inventory = get_all_inventory()
+    for inv in inventory:
+        if (inv.get("item_name", "").lower().strip() == item_name.lower().strip()
+            and inv.get("specification", "").lower().strip() == specification.lower().strip()
+            and inv.get("category", "").lower().strip() == category.lower().strip()):
+            update_inventory_qty(inv["item_id"], -quantity)
+            return True
+    return False
+
+
 def receive_to_inventory(item_name, category, sub_category, specification, quantity, unit,
                          location="Main Store", price=0):
     """Receive material into inventory. Aggregates with existing stock by
@@ -1576,13 +1600,17 @@ def get_all_issued_material():
 
 @_write_and_clear
 def return_issued_material(record, return_qty, returned_by, reason=""):
-    """Return part/all of an issued record back to raw inventory.
-    Adds qty back via receive_to_inventory (aggregating), then decrements
-    the issued record — deleting it entirely if fully returned."""
-    receive_to_inventory(
-        record.get("item_name", ""), record.get("category", "Returned"),
-        record.get("sub_category", ""), record.get("specification", ""),
-        return_qty, record.get("unit", "Nos"))
+    """Return part/all of an issued record to the SCRAP STORE.
+    Creates a scrap entry (visible in Scrap Store tabs and searchable when
+    building Service POs), then decrements the issued record — deleting it
+    entirely if fully returned."""
+    add_scrap_item(
+        record.get("item_name", ""),
+        record.get("category", "Returned"),
+        record.get("specification", ""),
+        return_qty, record.get("unit", "Nos"),
+        source_po=record.get("issue_id", record.get("project_id", "")),
+        notes=f"Returned by {returned_by}" + (f": {reason}" if reason else ""))
     db = get_dynamodb()
     table = db.Table(TABLES["issued_material"])
     remaining = float(record.get("quantity", 0)) - float(return_qty)

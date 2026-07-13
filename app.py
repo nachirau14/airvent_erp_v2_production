@@ -12,6 +12,8 @@ import importlib
 
 st.set_page_config(page_title="FabriFlow ERP — Production", page_icon="🔧", layout="wide", initial_sidebar_state="expanded")
 
+from utils.db import clear_run_store
+clear_run_store()  # fresh data every rerun; intra-run calls still memoized
 from auth import check_auth, logout
 if not check_auth("production"):
     st.stop()
