@@ -7,7 +7,7 @@ import uuid
 import json
 import io
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from boto3.dynamodb.conditions import Key, Attr
 from config import TABLES
@@ -1549,9 +1549,50 @@ def create_material_issue(project_id, product_id, items, issued_by):
              "product_id": product_id, "line_items": _to_decimal(items),
              "issued_by": issued_by, "issued_at": _now()}
     table.put_item(Item=issue)
+    # Per-item records in erp_issued_material (auto-expire via DynamoDB TTL after 15 days)
+    issued_table = db.Table(TABLES["issued_material"])
+    expires_at = int((datetime.utcnow() + timedelta(days=15)).timestamp())
     for it in items:
+        issued_table.put_item(Item=_to_decimal({
+            "record_id": _gen_id("IMR-"), "issue_id": issue["issue_id"],
+            "project_id": project_id, "product_id": product_id,
+            "item_name": it.get("item_name", ""),
+            "specification": it.get("specification", ""),
+            "category": it.get("category", ""),
+            "sub_category": it.get("sub_category", ""),
+            "quantity": it["quantity"], "unit": it.get("unit", ""),
+            "issued_by": issued_by, "issued_at": _now(),
+            "expires_at": expires_at,   # DynamoDB TTL attribute — auto-deleted after 15 days
+        }))
         update_inventory_qty(it["item_id"], -it["quantity"])
     return _from_decimal(issue)
+
+
+def get_all_issued_material():
+    """All issued-material records (auto-purged by DynamoDB TTL after 15 days)."""
+    items = _get_from_run_store("issued_material", lambda: _cached_scan(TABLES["issued_material"]))
+    return [i for i in items if i.get("quantity", 0) > 0]
+
+
+@_write_and_clear
+def return_issued_material(record, return_qty, returned_by, reason=""):
+    """Return part/all of an issued record back to raw inventory.
+    Adds qty back via receive_to_inventory (aggregating), then decrements
+    the issued record — deleting it entirely if fully returned."""
+    receive_to_inventory(
+        record.get("item_name", ""), record.get("category", "Returned"),
+        record.get("sub_category", ""), record.get("specification", ""),
+        return_qty, record.get("unit", "Nos"))
+    db = get_dynamodb()
+    table = db.Table(TABLES["issued_material"])
+    remaining = float(record.get("quantity", 0)) - float(return_qty)
+    if remaining <= 0:
+        table.delete_item(Key={"record_id": record["record_id"]})
+    else:
+        table.update_item(Key={"record_id": record["record_id"]},
+            UpdateExpression="SET quantity = :q, last_return = :r",
+            ExpressionAttributeValues={":q": Decimal(str(remaining)),
+                ":r": f"{return_qty} by {returned_by}: {reason}"[:200]})
 
 def get_material_issues(project_id=None):
     if project_id:
