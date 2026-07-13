@@ -47,6 +47,7 @@ with st.sidebar:
         [
             "📦 Issue Material",
             "🔄 Return Material",
+            "📤 Issued Material",
             "📋 View Inventory",
             "🏗️ Update Production",
         ],
@@ -60,6 +61,7 @@ with st.sidebar:
 PAGE_MAP = {
     "📦 Issue Material": "views.issue_material",
     "🔄 Return Material": "views.return_material",
+    "📤 Issued Material": "views.issued_log",
     "📋 View Inventory": "views.view_inventory",
     "🏗️ Update Production": "views.update_production",
 }
