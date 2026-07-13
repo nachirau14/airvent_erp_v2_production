@@ -6,7 +6,7 @@ from utils.ui_helpers import section_header, empty_state
 
 def render():
     st.markdown("# 🔄 Return Material")
-    st.markdown("*Select from material issued in the last 15 days — returns go back to raw inventory*")
+    st.markdown("*Select from material issued in the last 15 days — returns go to the ♻️ Scrap Store*")
     st.markdown("---")
 
     issued = get_all_issued_material()
@@ -52,14 +52,14 @@ def render():
         with c2:
             by = st.text_input("Returned By *", key="ret_by")
         reason = st.text_area("Reason", key="ret_r")
-        if st.form_submit_button("✅ Return to Store", type="primary", use_container_width=True):
+        if st.form_submit_button("✅ Return to Scrap Store", type="primary", use_container_width=True):
             if qty > 0 and by:
                 return_issued_material(rec, qty, by, reason)
                 remaining = issued_qty - qty
                 if remaining <= 0:
-                    st.success(f"Returned **{qty} {rec.get('unit','')}** of **{rec['item_name']}** — record fully returned and closed.")
+                    st.success(f"Returned **{qty} {rec.get('unit','')}** of **{rec['item_name']}** — added to Scrap Store. Record closed.")
                 else:
-                    st.success(f"Returned **{qty} {rec.get('unit','')}** of **{rec['item_name']}** — {remaining} still issued.")
+                    st.success(f"Returned **{qty} {rec.get('unit','')}** of **{rec['item_name']}** — added to Scrap Store. {remaining} still issued.")
                 st.rerun()
             else:
                 st.error("Quantity and Returned By are required.")
